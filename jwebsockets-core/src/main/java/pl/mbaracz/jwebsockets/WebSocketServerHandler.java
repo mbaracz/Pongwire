@@ -74,6 +74,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     private WebSocketSession<T, D> openedSession;
     private boolean closeHandled;
 
+    // Pending close of a connection that has not completed the WebSocket handshake
+    private ScheduledFuture<?> handshakeTimeout;
+
     // Pending close of the connection after a heartbeat ping, cancelled only by a pong
     private ScheduledFuture<?> heartbeatTimeout;
 
@@ -278,10 +281,22 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     }
 
     @Override
+    public void handlerAdded(ChannelHandlerContext context) {
+        // A deadline rather than a read timeout, so a client sending its request slowly cannot keep the connection open
+        Duration timeout = webSocketServer.getConfiguration().getHandshakeTimeout();
+
+        handshakeTimeout = context.executor().schedule(() -> {
+            LOGGER.debug("Closing channel with id {}, the handshake did not complete in time", context.channel().id());
+            context.close();
+        }, timeout.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    @Override
     public void channelInactive(ChannelHandlerContext context) {
         ChannelId channelId = context.channel().id();
         LOGGER.debug("Channel with id {} is now inactive", channelId);
 
+        cancelHandshakeTimeout();
         cancelHeartbeatTimeout();
         cancelIdleTimeout();
         cancelUnwritableTimeout();
@@ -671,6 +686,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
         handshakeFuture.addListener(it -> {
             if (it.isSuccess()) {
+                cancelHandshakeTimeout();
                 // Netty inserts the encoder before its decoder. Intercept closes between them so
                 // frames written by the decoder and by every later handler retain their status.
                 context.pipeline().addAfter(
@@ -811,6 +827,16 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         cancelIdleTimeout();
         idleTimeout = channel.eventLoop()
             .schedule(() -> closeOnIdleTimeout(channel), timeout.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    /**
+     * Cancels the pending handshake timeout, if any.
+     */
+    private void cancelHandshakeTimeout() {
+        if (handshakeTimeout != null) {
+            handshakeTimeout.cancel(false);
+            handshakeTimeout = null;
+        }
     }
 
     /**

@@ -57,6 +57,11 @@ public final class WebSocketServerConfiguration<T> {
     private final int maxMessageSize;
 
     /**
+     * Time a connection has to complete the WebSocket handshake before it is closed.
+     */
+    private final Duration handshakeTimeout;
+
+    /**
      * Time without received data after which a session is pinged, null if heartbeat is disabled.
      */
     private final Duration heartbeatInterval;
@@ -139,6 +144,7 @@ public final class WebSocketServerConfiguration<T> {
         this.maxHandshakeHeaderSize = builder.maxHandshakeHeaderSize;
         this.maxFrameSize = builder.maxFrameSize;
         this.maxMessageSize = builder.maxMessageSize;
+        this.handshakeTimeout = builder.handshakeTimeout;
         this.heartbeatInterval = builder.heartbeatInterval;
         this.heartbeatTimeout = builder.heartbeatTimeout;
         this.idleTimeout = builder.idleTimeout;
@@ -181,6 +187,7 @@ public final class WebSocketServerConfiguration<T> {
         builder.maxHandshakeHeaderSize = maxHandshakeHeaderSize;
         builder.maxFrameSize = maxFrameSize;
         builder.maxMessageSize = maxMessageSize;
+        builder.handshakeTimeout = handshakeTimeout;
         builder.heartbeatInterval = heartbeatInterval;
         builder.heartbeatTimeout = heartbeatTimeout;
         builder.idleTimeout = idleTimeout;
@@ -229,6 +236,10 @@ public final class WebSocketServerConfiguration<T> {
 
     public int getMaxMessageSize() {
         return maxMessageSize;
+    }
+
+    public Duration getHandshakeTimeout() {
+        return handshakeTimeout;
     }
 
     public Duration getHeartbeatInterval() {
@@ -306,6 +317,7 @@ public final class WebSocketServerConfiguration<T> {
         private int maxHandshakeHeaderSize = 8 * 1024;
         private int maxFrameSize = 1024 * 1024;
         private int maxMessageSize = 1024 * 1024;
+        private Duration handshakeTimeout = Duration.ofSeconds(10);
         private Duration heartbeatInterval;
         private Duration heartbeatTimeout = Duration.ofSeconds(10);
         private Duration idleTimeout;
@@ -391,6 +403,21 @@ public final class WebSocketServerConfiguration<T> {
                 throw new IllegalArgumentException("Maximum message size must be positive!");
             }
             this.maxMessageSize = maxMessageSize;
+            return this;
+        }
+
+        /**
+         * Sets how long a connection may take to complete the WebSocket handshake,
+         * including the TLS handshake, before it is closed.
+         *
+         * @param handshakeTimeout Handshake timeout, positive, 10 seconds by default.
+         * @return This builder.
+         */
+        public Builder<T> setHandshakeTimeout(Duration handshakeTimeout) {
+            if (handshakeTimeout == null || !handshakeTimeout.isPositive()) {
+                throw new IllegalArgumentException("Handshake timeout must be positive!");
+            }
+            this.handshakeTimeout = handshakeTimeout;
             return this;
         }
 

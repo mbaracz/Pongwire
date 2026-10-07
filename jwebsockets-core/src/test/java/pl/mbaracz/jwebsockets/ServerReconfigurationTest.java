@@ -162,6 +162,7 @@ class ServerReconfigurationTest {
             .setCloseOnException(true)
             .setMaxHandshakeHeaderSize(4096)
             .setMaxFrameSize(1024)
+            .setHandshakeTimeout(Duration.ofSeconds(7))
             .setHeartbeatInterval(Duration.ofSeconds(30))
             .setHeartbeatTimeout(Duration.ofSeconds(5))
             .setIdleTimeout(Duration.ofMinutes(5))
@@ -189,6 +190,7 @@ class ServerReconfigurationTest {
             softly.assertThat(configuration.isCloseOnException()).as("closeOnException").isTrue();
             softly.assertThat(configuration.getMaxHandshakeHeaderSize()).as("maxHandshakeHeaderSize").isEqualTo(4096);
             softly.assertThat(configuration.getMaxFrameSize()).as("maxFrameSize").isEqualTo(1024);
+            softly.assertThat(configuration.getHandshakeTimeout()).as("handshakeTimeout").isEqualTo(Duration.ofSeconds(7));
             softly.assertThat(configuration.getHeartbeatInterval()).as("heartbeatInterval").isEqualTo(Duration.ofSeconds(30));
             softly.assertThat(configuration.getHeartbeatTimeout()).as("heartbeatTimeout").isEqualTo(Duration.ofSeconds(5));
             softly.assertThat(configuration.getIdleTimeout()).as("idleTimeout").isEqualTo(Duration.ofMinutes(5));
@@ -261,6 +263,10 @@ class ServerReconfigurationTest {
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setMaxFrameSize(-1)))
                 .isInstanceOf(IllegalArgumentException.class);
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setMaxMessageSize(-1)))
+                .isInstanceOf(IllegalArgumentException.class);
+            softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setHandshakeTimeout(null)))
+                .isInstanceOf(IllegalArgumentException.class);
+            softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setHandshakeTimeout(Duration.ZERO)))
                 .isInstanceOf(IllegalArgumentException.class);
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setHeartbeatTimeout(null)))
                 .isInstanceOf(IllegalArgumentException.class);
