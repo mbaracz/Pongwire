@@ -1,10 +1,15 @@
 package pl.mbaracz.jwebsockets;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import pl.mbaracz.jwebsockets.handler.UpgradeResult;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
@@ -71,6 +76,19 @@ class HandshakeTest {
         FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/chat");
         request.headers().set(Util.getDefaultHeaders());
         request.headers().set("X-Large", "x".repeat(size));
+        return request;
+    }
+
+    /**
+     * Creates a pre-RFC 6455 (Hixie-75) request, which has no Sec-WebSocket-Version header, with the given body.
+     */
+    private FullHttpRequest createLegacyRequest(ByteBuf content) {
+        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/chat", content);
+        request.headers()
+            .set(HttpHeaderNames.HOST, "localhost:8080")
+            .set(HttpHeaderNames.UPGRADE, "WebSocket")
+            .set(HttpHeaderNames.CONNECTION, "Upgrade")
+            .set(HttpHeaderNames.ORIGIN, "http://localhost:8080");
         return request;
     }
 
@@ -175,22 +193,26 @@ class HandshakeTest {
     }
 
     @Test
-    void shouldPutEndpointPathInLocationWhenLegacyClientConnects() {
-        // Requests without a WebSocket version use the legacy handshake, the only one that sends the location
-        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/chat");
+    void shouldRespondWithUpgradeRequiredAndCloseWhenHixie75ClientConnects() {
+        PipelineResult result = sendRequestThroughPipeline(createLegacyRequest(Unpooled.EMPTY_BUFFER));
+
+        assertThat(result.response().status()).as("Should require RFC 6455").isEqualTo(HttpResponseStatus.UPGRADE_REQUIRED);
+        assertThat(result.channelOpen()).as("Connection should be closed").isFalse();
+        assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
+    @Test
+    void shouldRespondWithUpgradeRequiredAndCloseWhenHixie76ClientConnects() {
+        FullHttpRequest request = createLegacyRequest(Unpooled.wrappedBuffer(new byte[8]));
         request.headers()
-            .set(HttpHeaderNames.HOST, "localhost:8080")
-            .set(HttpHeaderNames.UPGRADE, "WebSocket")
-            .set(HttpHeaderNames.CONNECTION, "Upgrade")
-            .set(HttpHeaderNames.ORIGIN, "http://localhost:8080");
+            .set(HttpHeaderNames.SEC_WEBSOCKET_KEY1, "1 1")
+            .set(HttpHeaderNames.SEC_WEBSOCKET_KEY2, "1 1");
 
-        HttpResponse response = sendRequest(request);
+        PipelineResult result = sendRequestThroughPipeline(request);
 
-        // Assert location points to the endpoint path
-        assertThat(response.status()).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
-        assertThat(response.headers().get(HttpHeaderNames.WEBSOCKET_LOCATION))
-            .as("Location should contain the path")
-            .isEqualTo("ws://localhost:8080/chat");
+        assertThat(result.response().status()).as("Should require RFC 6455").isEqualTo(HttpResponseStatus.UPGRADE_REQUIRED);
+        assertThat(result.channelOpen()).as("Connection should be closed").isFalse();
+        assertThat(opened).as("Session should not be opened").isEmpty();
     }
 
     @Test
@@ -236,5 +258,86 @@ class HandshakeTest {
         assertThat(response.status()).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
         assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL)).as("Should not select a subprotocol").isNull();
         assertThat(opened.getFirst().getSubprotocol()).as("Session should have no subprotocol").isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "abc", "AAAAAAAAAAAAAAAAAAAA"})
+    void shouldRespondWithBadRequestAndCloseWhenKeyIsInvalid(String key) {
+        List<UpgradeRequest> upgrades = new ArrayList<>();
+        server.onUpgrade((upgradeRequest, _) -> {
+            upgrades.add(upgradeRequest);
+            return UpgradeResult.accept(null);
+        });
+
+        // "AAAAAAAAAAAAAAAAAAAA" is valid Base64, but decodes to 15 bytes instead of 16
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().set(HttpHeaderNames.SEC_WEBSOCKET_KEY, key);
+
+        PipelineResult result = sendRequestThroughPipeline(request);
+
+        assertThat(result.response().status()).as("Should reject the handshake").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+        assertThat(result.channelOpen()).as("Connection should be closed").isFalse();
+        assertThat(upgrades).as("Upgrade handler should not be invoked").isEmpty();
+        assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
+    @Test
+    void shouldRespondWithBadRequestAndCloseWhenKeyIsMissing() {
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().remove(HttpHeaderNames.SEC_WEBSOCKET_KEY);
+
+        PipelineResult result = sendRequestThroughPipeline(request);
+
+        assertThat(result.response().status()).as("Should reject the handshake").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+        assertThat(result.channelOpen()).as("Connection should be closed").isFalse();
+        assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
+    @Test
+    void shouldRespondWithBadRequestAndCloseWhenNettyRejectsHandshake() {
+        // The token list passes the server's own check, while Netty requires the value to be exactly "websocket"
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().set(HttpHeaderNames.UPGRADE, "websocket, h2c");
+
+        PipelineResult result = sendRequestThroughPipeline(request);
+
+        assertThat(result.response().status()).as("Should reject the handshake").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+        assertThat(result.channelOpen()).as("Connection should be closed").isFalse();
+        assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
+    @Test
+    void shouldRespondWithUpgradeRequiredAndCloseWhenVersionIsUnsupported() {
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().set(HttpHeaderNames.SEC_WEBSOCKET_VERSION, "99");
+
+        PipelineResult result = sendRequestThroughPipeline(request);
+
+        assertThat(result.response().status()).as("Should require another version").isEqualTo(HttpResponseStatus.UPGRADE_REQUIRED);
+        assertThat(result.response().headers().get(HttpHeaderNames.SEC_WEBSOCKET_VERSION))
+            .as("Should name the supported version")
+            .isEqualTo("13");
+        assertThat(result.channelOpen()).as("Connection should be closed").isFalse();
+    }
+
+    @Test
+    void shouldRespondWithBadRequestAndCloseWhenMethodIsNotGet() {
+        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/chat");
+        request.headers().set(Util.getDefaultHeaders());
+
+        PipelineResult result = sendRequestThroughPipeline(request);
+
+        assertThat(result.response().status()).as("Should reject the handshake").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+        assertThat(result.channelOpen()).as("Connection should be closed").isFalse();
+    }
+
+    @Test
+    void shouldIgnoreFrameWhenHandshakeHasNotCompleted() {
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerHandler<>(server));
+
+        channel.writeInbound(new TextWebSocketFrame("hello"));
+
+        assertThat(channel.isOpen()).as("Connection should stay open").isTrue();
+        assertThat(channel.<Object>readOutbound()).as("Should not respond").isNull();
     }
 }

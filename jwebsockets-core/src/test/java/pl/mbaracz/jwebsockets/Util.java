@@ -123,7 +123,7 @@ class Util {
         headers.add(HttpHeaderNames.HOST, "http://localhost:8081");
         headers.add(HttpHeaderNames.UPGRADE, "websocket");
         headers.add(HttpHeaderNames.CONNECTION, "Upgrade");
-        headers.add(HttpHeaderNames.SEC_WEBSOCKET_KEY, Base64.getEncoder().encodeToString("randomKey".getBytes()));
+        headers.add(HttpHeaderNames.SEC_WEBSOCKET_KEY, Base64.getEncoder().encodeToString("random16ByteKey!".getBytes()));
         headers.add(HttpHeaderNames.SEC_WEBSOCKET_VERSION, "13");
         return headers;
     }

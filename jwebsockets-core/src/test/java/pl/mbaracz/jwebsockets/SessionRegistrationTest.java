@@ -86,13 +86,14 @@ class SessionRegistrationTest {
     }
 
     @Test
-    void shouldNotRegisterSessionWhenHandshakeCannotComplete() {
+    void shouldCloseWithoutRegisteringSessionWhenHandshakeCannotComplete() {
         // Without an HTTP codec in the pipeline the handshake fails
         EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerHandler<>(server));
         Util.performHandshake(channel, "/");
 
         // Assert no session was registered
         assertThat(server.getSessionByChannelId(channel.id())).as("Session should not be registered").isNull();
+        assertThat(channel.isOpen()).as("Channel should be closed").isFalse();
     }
 
     @Test

@@ -91,6 +91,7 @@ class ConnectionTest {
         void shouldOpenConnectionWhenCustomPathIsValid() {
             WebSocketServerHandler<String, Object> handler = new WebSocketServerHandler<>(customPathServer);
             EmbeddedChannel channel = Util.newEmbeddedChannel(handler);
+            channel.pipeline().addFirst(new HttpServerCodec());
 
             // Construct http request
             String path = "/foo";
@@ -133,6 +134,7 @@ class ConnectionTest {
             server.configure(configurer -> configurer.setAllowedOriginPattern(Pattern.compile("^(http|https)://example\\.com$")));
 
             EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerHandler<>(server));
+            channel.pipeline().addFirst(new HttpServerCodec());
 
             // Construct http request
             String path = "/";
@@ -178,6 +180,7 @@ class ConnectionTest {
             server.configure(configurer -> configurer.setAllowedOrigins("http://example.com"));
 
             EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerHandler<>(server));
+            channel.pipeline().addFirst(new HttpServerCodec());
 
             // Construct http request
             String path = "/";

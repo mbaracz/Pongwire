@@ -6,6 +6,8 @@ import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import pl.mbaracz.jwebsockets.handler.UpgradeResult;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
@@ -173,5 +175,41 @@ class UpgradeHandlerTest {
 
         assertThat(response.getHeaders()).hasSize(1);
         assertThat(response.getHeaders().get("X-Test")).containsExactly("first", "second");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void shouldRespondWithInternalServerErrorAndCloseWhenUpgradeHandlerThrows(boolean closeOnException) {
+        IllegalStateException failure = new IllegalStateException("database is down");
+        List<Throwable> errors = new ArrayList<>();
+        server
+            .configure(configurer -> configurer.setCloseOnException(closeOnException))
+            .onUpgrade((_, _) -> {
+                throw failure;
+            })
+            .onError((_, exception) -> errors.add(exception));
+
+        EmbeddedChannel channel = upgrade("alice");
+
+        assertThat(readResponse(channel).status()).as("Should report a server error").isEqualTo(HttpResponseStatus.INTERNAL_SERVER_ERROR);
+        assertThat(channel.isOpen()).as("Channel should be closed").isFalse();
+        assertThat(errors).as("Error handler should receive the failure").containsExactly(failure);
+        assertThat(opened).as("No session should be opened").isEmpty();
+    }
+
+    @Test
+    void shouldRespondWithInternalServerErrorAndCloseWhenRejectionHeaderIsInvalid() {
+        server.onUpgrade((_, response) -> {
+            response.setHeader("X-Reason", "first\r\nSet-Cookie: injected=1");
+            return UpgradeResult.reject();
+        });
+
+        EmbeddedChannel channel = upgrade("alice");
+
+        HttpResponse response = readResponse(channel);
+
+        assertThat(response.status()).as("Should report a server error").isEqualTo(HttpResponseStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.headers().contains(HttpHeaderNames.SET_COOKIE)).as("Should not inject a header").isFalse();
+        assertThat(channel.isOpen()).as("Channel should be closed").isFalse();
     }
 }

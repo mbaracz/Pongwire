@@ -37,6 +37,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -383,6 +384,22 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     }
 
     /**
+     * Checks that the Sec-WebSocket-Key header is a Base64-encoded 16-byte value (RFC 6455, section 4.1).
+     *
+     * @param request the HTTP request.
+     * @return true if the key is valid, false otherwise.
+     */
+    private static boolean isValidKey(FullHttpRequest request) {
+        String key = request.headers().get(HttpHeaderNames.SEC_WEBSOCKET_KEY);
+
+        try {
+            return key != null && Base64.getDecoder().decode(key).length == 16;
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    /**
      * Returns the path of the request URI without its query string.
      *
      * @param request the HTTP request.
@@ -563,12 +580,12 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      */
     private void handleHttpRequest(ChannelHandlerContext context, FullHttpRequest request) {
         if (!shouldUpgrade(request)) {
-            sendBadRequestResponse(context);
+            sendResponse(context, HttpResponseStatus.BAD_REQUEST);
             return;
         }
 
         if (!isUpgradeFromAllowedOrigin(request)) {
-            sendForbiddenResponse(context);
+            sendResponse(context, HttpResponseStatus.FORBIDDEN);
             return;
         }
 
@@ -591,8 +608,15 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
         handshaker = wsFactory.newHandshaker(request);
 
-        if (handshaker == null) {
-            WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(context.channel());
+        // Netty leaks its response buffer when a malformed pre-RFC 6455 (Hixie) handshake fails, so those are unsupported too
+        if (handshaker == null || handshaker.version() == WebSocketVersion.V00) {
+            WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(context.channel())
+                .addListener(ChannelFutureListener.CLOSE);
+            return;
+        }
+
+        if (!isValidKey(request)) {
+            sendResponse(context, HttpResponseStatus.BAD_REQUEST);
             return;
         }
 
@@ -602,12 +626,26 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         if (upgradeHandler != null) {
             UpgradeRequest upgradeRequest = createUpgradeRequest(context, request);
             UpgradeResponse upgradeResponse = new UpgradeResponse();
-            UpgradeResult<D> result = upgradeHandler.handleUpgrade(upgradeRequest, upgradeResponse);
+            UpgradeResult<D> result;
+            HttpResponse rejection = null;
 
-            // A missing result rejects the upgrade too, so the client still gets a response
-            if (result == null || !result.isAccepted()) {
-                HttpResponse response = createHttpResponse(upgradeResponse);
-                context.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
+            // A failing handler, or a rejection with headers Netty refuses, is a server error the client still gets a response to
+            try {
+                result = upgradeHandler.handleUpgrade(upgradeRequest, upgradeResponse);
+
+                // A missing result rejects the upgrade too, so the client still gets a response
+                if (result == null || !result.isAccepted()) {
+                    rejection = createHttpResponse(upgradeResponse);
+                }
+            } catch (RuntimeException exception) {
+                // Reported once the response is written, as closeOnException must not drop the pending response
+                sendResponse(context, HttpResponseStatus.INTERNAL_SERVER_ERROR)
+                    .addListener(_ -> handleFailure(context, exception));
+                return;
+            }
+
+            if (rejection != null) {
+                context.writeAndFlush(rejection).addListener(ChannelFutureListener.CLOSE);
                 return;
             }
 
@@ -621,7 +659,17 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             configuration.getCloseTimeout()
         );
 
-        handshaker.handshake(context.channel(), request).addListener(it -> {
+        ChannelFuture handshakeFuture;
+
+        // Netty validates the request once more before writing the response, and throws on what it rejects
+        try {
+            handshakeFuture = handshaker.handshake(context.channel(), request);
+        } catch (RuntimeException exception) {
+            sendResponse(context, HttpResponseStatus.BAD_REQUEST);
+            return;
+        }
+
+        handshakeFuture.addListener(it -> {
             if (it.isSuccess()) {
                 // Netty inserts the encoder before its decoder. Intercept closes between them so
                 // frames written by the decoder and by every later handler retain their status.
@@ -642,6 +690,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                 if (openHandler != null) {
                     runCallback(context, () -> openHandler.handleOpen(session));
                 }
+            } else {
+                // The response could not be written, so the client cannot be answered anymore
+                context.close();
             }
         });
     }
@@ -890,24 +941,14 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     }
 
     /**
-     * Sends a forbidden response to the client.
+     * Sends a response with the given status to the client and closes the connection.
      *
      * @param context the channel handler context.
+     * @param status  the response status.
+     * @return the future of the write, notified after the connection is closed.
      */
-    private static void sendForbiddenResponse(ChannelHandlerContext context) {
-        HttpResponseStatus status = HttpResponseStatus.FORBIDDEN;
+    private static ChannelFuture sendResponse(ChannelHandlerContext context, HttpResponseStatus status) {
         DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status);
-        context.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
-    }
-
-    /**
-     * Sends a bad request response to the client.
-     *
-     * @param context the channel handler context.
-     */
-    private static void sendBadRequestResponse(ChannelHandlerContext context) {
-        HttpResponseStatus status = HttpResponseStatus.BAD_REQUEST;
-        DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status);
-        context.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
+        return context.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
     }
 }
