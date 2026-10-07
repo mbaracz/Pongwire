@@ -1,5 +1,7 @@
 package pl.mbaracz.jwebsockets;
 
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
@@ -81,6 +83,28 @@ class HeartbeatTest {
 
         assertPingSent(channel);
         assertThat(channel.isOpen()).as("Channel should stay open").isTrue();
+    }
+
+    @Test
+    void shouldNotSendPingWhenChannelIsUnwritable() {
+        server.configure(configurer -> configurer.setWriteBufferWaterMark(1024, 2048));
+        EmbeddedChannel channel = connect();
+
+        // A client reading slowly leaves the write buffer full, the pong could not come back in time
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+            }
+        });
+        channel.writeAndFlush(new TextWebSocketFrame("x".repeat(4096)));
+        long bufferedBytes = channel.unsafe().outboundBuffer().totalPendingWriteBytes();
+
+        advanceTime(channel, 30);
+        advanceTime(channel, 10);
+
+        assertThat(channel.unsafe().outboundBuffer().totalPendingWriteBytes()).as("No ping should be queued").isEqualTo(bufferedBytes);
+        assertThat(channel.isOpen()).as("Channel should stay open").isTrue();
+        assertThat(closes).as("Session should not be closed").isEmpty();
     }
 
     @Test

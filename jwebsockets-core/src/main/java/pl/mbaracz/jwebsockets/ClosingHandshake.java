@@ -58,11 +58,20 @@ final class ClosingHandshake {
         // Report what the frame carries to the close handler, unless the session is already being closed
         channel.attr(CloseInfo.KEY).setIfAbsent(new CloseInfo(frame.statusCode(), frame.reasonText()));
 
+        closeAfter(channel, timeout);
+        channel.writeAndFlush(frame).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+    }
+
+    /**
+     * Closes the connection after the timeout, unless it is closed before.
+     *
+     * @param channel the channel of the WebSocket connection.
+     * @param timeout the time after which the connection is closed.
+     */
+    static void closeAfter(Channel channel, Duration timeout) {
         ScheduledFuture<?> closeTimeout = channel.eventLoop()
             .schedule(() -> channel.close(), timeout.toNanos(), TimeUnit.NANOSECONDS);
         channel.closeFuture().addListener(_ -> closeTimeout.cancel(false));
-
-        channel.writeAndFlush(frame).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
     }
 
     static boolean markClientStarted(Channel channel) {

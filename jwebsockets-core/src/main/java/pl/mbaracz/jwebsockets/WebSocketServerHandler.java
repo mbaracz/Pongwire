@@ -80,6 +80,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     private WebSocketSession<T, D> openedSession;
     private boolean closeHandled;
 
+    // Payload of the most recent Ping received while the channel was unwritable, answered once it is writable again
+    private ByteBuf deferredPongPayload;
+
     // Pending close of a connection that has not completed the WebSocket handshake
     private ScheduledFuture<?> handshakeTimeout;
 
@@ -306,6 +309,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         cancelHeartbeatTimeout();
         cancelIdleTimeout();
         cancelUnwritableTimeout();
+        releaseDeferredPong();
 
         if (openedSession != null) {
             // Use the status the server closed the connection with, otherwise no close frame
@@ -329,6 +333,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             boolean writable = context.channel().isWritable();
 
             runCallback(context, () -> writabilityHandler.handleWritabilityChanged(session, writable));
+        }
+
+        if (deferredPongPayload != null && context.channel().isWritable()) {
+            context.writeAndFlush(new PongWebSocketFrame(deferredPongPayload));
+            deferredPongPayload = null;
         }
 
         if (openedSession != null && !closeHandled) {
@@ -493,7 +502,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         int code = closeFrame.statusCode() == -1 ? WebSocketCloseStatus.EMPTY.code() : closeFrame.statusCode();
         String reason = closeFrame.reasonText();
 
+        // The echo is written behind everything already buffered, so a client that stopped reading never receives it
         handshaker.close(context.channel(), closeFrame.retain());
+        ClosingHandshake.closeAfter(context.channel(), webSocketServer.getConfiguration().getCloseTimeout());
         handleSessionClosed(context, session, new CloseInfo(code, reason));
     }
 
@@ -564,9 +575,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         switch (frame) {
             case CloseWebSocketFrame closeFrame -> handleCloseFrame(context, closeFrame, session);
 
-            case PingWebSocketFrame pingFrame ->
-                // A Ping must be answered with a Pong carrying the same payload (RFC 6455, section 5.5.2)
-                context.writeAndFlush(new PongWebSocketFrame(pingFrame.content().retain()));
+            case PingWebSocketFrame pingFrame -> answerPing(context, pingFrame);
 
             case PongWebSocketFrame _ ->
                 // A Pong needs no response (RFC 6455, section 5.5.3), but it answers a heartbeat ping
@@ -783,6 +792,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param timeout the time to wait for the pong.
      */
     private void sendHeartbeatPing(Channel channel, Duration timeout) {
+        // Behind a full write buffer the Pong could not come back in time, and the ping would only add to the buffer
+        if (!channel.isWritable()) {
+            return;
+        }
+
         // Written from the tail of the pipeline, so the frame passes the WebSocket encoder
         channel.writeAndFlush(new PingWebSocketFrame());
 
@@ -790,6 +804,36 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         if (heartbeatTimeout == null) {
             heartbeatTimeout = channel.eventLoop()
                 .schedule(() -> closeOnHeartbeatTimeout(channel), timeout.toNanos(), TimeUnit.NANOSECONDS);
+        }
+    }
+
+    /**
+     * Answers a Ping with a Pong carrying the same payload
+     * (RFC 6455, section 5.5.2). The Pong is flushed with the rest of the read.
+     * While the channel is unwritable, only the most recent Ping is answered
+     * once it is writable again (RFC 6455, section 5.5.3), so a Ping flood
+     * cannot grow the write buffer.
+     *
+     * @param context   the channel handler context.
+     * @param pingFrame the received Ping.
+     */
+    private void answerPing(ChannelHandlerContext context, PingWebSocketFrame pingFrame) {
+        if (context.channel().isWritable()) {
+            context.write(new PongWebSocketFrame(pingFrame.content().retain()));
+            return;
+        }
+
+        releaseDeferredPong();
+        deferredPongPayload = pingFrame.content().retain();
+    }
+
+    /**
+     * Releases the payload of the deferred Pong, if any.
+     */
+    private void releaseDeferredPong() {
+        if (deferredPongPayload != null) {
+            deferredPongPayload.release();
+            deferredPongPayload = null;
         }
     }
 

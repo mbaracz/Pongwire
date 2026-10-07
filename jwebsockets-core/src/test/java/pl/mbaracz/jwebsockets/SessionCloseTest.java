@@ -101,6 +101,29 @@ class SessionCloseTest {
     }
 
     @Test
+    void shouldCloseConnectionWhenCloseEchoIsNotWrittenWithinCloseTimeout() {
+        EmbeddedChannel channel = Util.connect(server);
+        channel.freezeTime();
+
+        // A client that stops reading never receives the echo of its close frame
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+            }
+        });
+        Util.sendFromClient(channel, new CloseWebSocketFrame(WebSocketCloseStatus.NORMAL_CLOSURE, "bye"));
+
+        channel.advanceTimeBy(4999, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertThat(channel.isOpen()).as("Channel should stay open before the timeout").isTrue();
+
+        channel.advanceTimeBy(1, TimeUnit.MILLISECONDS);
+        channel.runScheduledPendingTasks();
+        assertThat(channel.isOpen()).as("Channel should be closed").isFalse();
+        assertThat(closes).as("Close handler should be called once with the client's status").isEqualTo(List.of(new Close(1000, "bye")));
+    }
+
+    @Test
     void shouldNotSendSecondCloseFrameWhenSessionIsClosedAgain() {
         EmbeddedChannel channel = Util.connect(server);
         WebSocketSession<String, Object> session = opened.getFirst();

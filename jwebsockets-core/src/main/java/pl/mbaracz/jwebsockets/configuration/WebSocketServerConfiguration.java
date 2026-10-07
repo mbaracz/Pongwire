@@ -435,6 +435,7 @@ public final class WebSocketServerConfiguration<T> {
 
         /**
          * Sets the heartbeat interval. A session that receives nothing for this long is sent a ping.
+         * No ping is sent while the session's write buffer is full, see {@link #setUnwritableTimeout(Duration)}.
          *
          * @param heartbeatInterval Heartbeat interval, positive, or null to disable heartbeat (default).
          * @return This builder.
