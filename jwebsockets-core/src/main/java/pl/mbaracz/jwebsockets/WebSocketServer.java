@@ -346,7 +346,7 @@ public class WebSocketServer<T, D> {
         synchronized (sessionTopicLock) {
             sessionTopicRegistry.unsubscribe(session, topic);
 
-            transition = sessionTopicRegistry.getSubscribers(topic).isEmpty()
+            transition = !sessionTopicRegistry.hasSubscribers(topic)
                 ? prepareBrokerUnsubscribe(topic)
                 : BrokerTransition.completed();
         }
@@ -536,7 +536,7 @@ public class WebSocketServer<T, D> {
                 if (subscription.status == BrokerSubscriptionStatus.UNSUBSCRIBED) {
                     subscription.broker = null;
 
-                    if (sessionTopicRegistry.getSubscribers(topic).isEmpty()) {
+                    if (!sessionTopicRegistry.hasSubscribers(topic)) {
                         brokerSubscriptions.remove(topic, subscription);
                     }
                 }
@@ -888,20 +888,8 @@ public class WebSocketServer<T, D> {
             WebSocketSession<T, D> session = sessionRegistry.remove(id);
 
             if (session != null) {
-                Set<String> subscribedTopics = new HashSet<>();
-
-                for (String topic : sessionTopicRegistry.getTopics()) {
-                    if (sessionTopicRegistry.isSubscribed(session, topic)) {
-                        subscribedTopics.add(topic);
-                    }
-                }
-
-                sessionTopicRegistry.unsubscribeAll(session);
-
-                for (String topic : subscribedTopics) {
-                    if (sessionTopicRegistry.getSubscribers(topic).isEmpty()) {
-                        transitions.add(prepareBrokerUnsubscribe(topic));
-                    }
+                for (String topic : sessionTopicRegistry.unsubscribeAll(session)) {
+                    transitions.add(prepareBrokerUnsubscribe(topic));
                 }
             }
         }
