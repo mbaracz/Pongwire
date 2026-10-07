@@ -44,6 +44,7 @@ import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -68,6 +69,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     // Runs the application callbacks of this connection one at a time and in order,
     // null to run them on the event loop
     private final Executor callbackExecutor;
+
+    // Callbacks submitted to the callback executor that have not finished yet.
+    // Reading from the connection stops at the configured maximum and resumes
+    // at half of it, both decided on the event loop.
+    private final AtomicInteger pendingCallbacks = new AtomicInteger();
 
     // The session opened on this connection and whether its closure was already handled,
     // so a close frame and the following channelInactive() report it only once
@@ -920,14 +926,43 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             return;
         }
 
-        callbackExecutor.execute(() -> {
-            try {
-                callback.run();
-            } catch (RuntimeException exception) {
-                // Report the failure like one thrown on the event loop, the next callbacks still run
-                context.pipeline().fireExceptionCaught(exception);
-            }
-        });
+        int maxPending = webSocketServer.getConfiguration().getMaxPendingCallbacks();
+
+        if (pendingCallbacks.incrementAndGet() >= maxPending) {
+            context.channel().config().setAutoRead(false);
+        }
+
+        try {
+            callbackExecutor.execute(() -> {
+                try {
+                    callback.run();
+                } catch (RuntimeException exception) {
+                    // Report the failure like one thrown on the event loop, the next callbacks still run
+                    context.pipeline().fireExceptionCaught(exception);
+                } finally {
+                    if (pendingCallbacks.decrementAndGet() == maxPending / 2) {
+                        context.executor().execute(() -> resumeReading(context, maxPending));
+                    }
+                }
+            });
+        } catch (RuntimeException exception) {
+            // A rejected callback never runs, so it must not keep the connection from reading
+            pendingCallbacks.decrementAndGet();
+            resumeReading(context, maxPending);
+            throw exception;
+        }
+    }
+
+    /**
+     * Resumes reading from the connection once the pending callbacks dropped to half of the maximum.
+     *
+     * @param context    the channel handler context.
+     * @param maxPending the maximum number of pending callbacks.
+     */
+    private void resumeReading(ChannelHandlerContext context, int maxPending) {
+        if (pendingCallbacks.get() <= maxPending / 2) {
+            context.channel().config().setAutoRead(true);
+        }
     }
 
     /**

@@ -168,6 +168,7 @@ class ServerReconfigurationTest {
             .setIdleTimeout(Duration.ofMinutes(5))
             .setCloseTimeout(Duration.ofSeconds(3))
             .setCallbackExecutor(callbackExecutor)
+            .setMaxPendingCallbacks(16)
             .setWriteBufferWaterMark(1024, 2048)
             .setBackpressurePolicy(BackpressurePolicy.REJECT_NEW)
             .setUnwritableTimeout(Duration.ofSeconds(20))
@@ -196,6 +197,7 @@ class ServerReconfigurationTest {
             softly.assertThat(configuration.getIdleTimeout()).as("idleTimeout").isEqualTo(Duration.ofMinutes(5));
             softly.assertThat(configuration.getCloseTimeout()).as("closeTimeout").isEqualTo(Duration.ofSeconds(3));
             softly.assertThat(configuration.getCallbackExecutor()).as("callbackExecutor").isSameAs(callbackExecutor);
+            softly.assertThat(configuration.getMaxPendingCallbacks()).as("maxPendingCallbacks").isEqualTo(16);
             softly.assertThat(configuration.getWriteBufferLowWaterMark()).as("writeBufferLowWaterMark").isEqualTo(1024);
             softly.assertThat(configuration.getWriteBufferHighWaterMark()).as("writeBufferHighWaterMark").isEqualTo(2048);
             softly.assertThat(configuration.getBackpressurePolicy()).as("backpressurePolicy").isEqualTo(BackpressurePolicy.REJECT_NEW);
@@ -263,6 +265,8 @@ class ServerReconfigurationTest {
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setMaxFrameSize(-1)))
                 .isInstanceOf(IllegalArgumentException.class);
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setMaxMessageSize(-1)))
+                .isInstanceOf(IllegalArgumentException.class);
+            softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setMaxPendingCallbacks(0)))
                 .isInstanceOf(IllegalArgumentException.class);
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setHandshakeTimeout(null)))
                 .isInstanceOf(IllegalArgumentException.class);

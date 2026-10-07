@@ -87,6 +87,11 @@ public final class WebSocketServerConfiguration<T> {
     private final Executor callbackExecutor;
 
     /**
+     * Callbacks of a session that may wait for the callback executor before the server stops reading from the session.
+     */
+    private final int maxPendingCallbacks;
+
+    /**
      * Low write buffer watermark in bytes, or null to use the Netty default.
      */
     private final Integer writeBufferLowWaterMark;
@@ -150,6 +155,7 @@ public final class WebSocketServerConfiguration<T> {
         this.idleTimeout = builder.idleTimeout;
         this.closeTimeout = builder.closeTimeout;
         this.callbackExecutor = builder.callbackExecutor;
+        this.maxPendingCallbacks = builder.maxPendingCallbacks;
         this.writeBufferLowWaterMark = builder.writeBufferLowWaterMark;
         this.writeBufferHighWaterMark = builder.writeBufferHighWaterMark;
         this.backpressurePolicy = builder.backpressurePolicy;
@@ -193,6 +199,7 @@ public final class WebSocketServerConfiguration<T> {
         builder.idleTimeout = idleTimeout;
         builder.closeTimeout = closeTimeout;
         builder.callbackExecutor = callbackExecutor;
+        builder.maxPendingCallbacks = maxPendingCallbacks;
         builder.writeBufferLowWaterMark = writeBufferLowWaterMark;
         builder.writeBufferHighWaterMark = writeBufferHighWaterMark;
         builder.backpressurePolicy = backpressurePolicy;
@@ -262,6 +269,10 @@ public final class WebSocketServerConfiguration<T> {
         return callbackExecutor;
     }
 
+    public int getMaxPendingCallbacks() {
+        return maxPendingCallbacks;
+    }
+
     public Integer getWriteBufferLowWaterMark() {
         return writeBufferLowWaterMark;
     }
@@ -323,6 +334,7 @@ public final class WebSocketServerConfiguration<T> {
         private Duration idleTimeout;
         private Duration closeTimeout = Duration.ofSeconds(5);
         private Executor callbackExecutor;
+        private int maxPendingCallbacks = 64;
         private Integer writeBufferLowWaterMark;
         private Integer writeBufferHighWaterMark;
         private BackpressurePolicy backpressurePolicy = BackpressurePolicy.BUFFER;
@@ -488,6 +500,21 @@ public final class WebSocketServerConfiguration<T> {
          */
         public Builder<T> setCallbackExecutor(Executor callbackExecutor) {
             this.callbackExecutor = callbackExecutor;
+            return this;
+        }
+
+        /**
+         * Sets how many callbacks of a session may wait for the callback executor before the server stops reading
+         * from the session. Reading resumes once half of them have run, so a slow callback slows down the client.
+         *
+         * @param maxPendingCallbacks Maximum number of pending callbacks per session, positive, 64 by default.
+         * @return This builder.
+         */
+        public Builder<T> setMaxPendingCallbacks(int maxPendingCallbacks) {
+            if (maxPendingCallbacks <= 0) {
+                throw new IllegalArgumentException("Max pending callbacks must be positive!");
+            }
+            this.maxPendingCallbacks = maxPendingCallbacks;
             return this;
         }
 
