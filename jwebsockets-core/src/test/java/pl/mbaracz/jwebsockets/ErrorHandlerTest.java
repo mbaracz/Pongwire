@@ -13,6 +13,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import pl.mbaracz.jwebsockets.configuration.WebSocketServerConfiguration;
 import pl.mbaracz.jwebsockets.handler.ErrorHandler;
+import pl.mbaracz.jwebsockets.message.MessageDecodeException;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
@@ -31,7 +32,7 @@ class ErrorHandlerTest {
 
     @Test
     void shouldNotifyErrorHandlerOnceBeforeObserverWhenDecoderFails() {
-        IllegalArgumentException failure = new IllegalArgumentException("decoder failed");
+        MessageDecodeException failure = new MessageDecodeException("decoder failed", new byte[0], null);
         List<FailureCall> calls = new ArrayList<>();
         TestConnection connection = connect(
             false,
@@ -89,7 +90,7 @@ class ErrorHandlerTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void shouldIgnoreErrorHandlerFailureAndApplyOriginalClosePolicy(boolean closeOnException) {
-        IllegalArgumentException failure = new IllegalArgumentException("decoder failed");
+        MessageDecodeException failure = new MessageDecodeException("decoder failed", new byte[0], null);
         AtomicInteger handlerCalls = new AtomicInteger();
         List<Throwable> observedFailures = new ArrayList<>();
         TestConnection connection = connect(

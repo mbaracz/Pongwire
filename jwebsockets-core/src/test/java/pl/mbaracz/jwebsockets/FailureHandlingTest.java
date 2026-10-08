@@ -8,14 +8,17 @@ import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import io.netty.util.ReferenceCountUtil;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import pl.mbaracz.jwebsockets.configuration.WebSocketServerConfiguration;
 import pl.mbaracz.jwebsockets.handler.MessageHandler;
+import pl.mbaracz.jwebsockets.message.MessageDecodeException;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -32,7 +35,7 @@ class FailureHandlingTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void shouldHandleDecoderFailureConsistently(boolean closeOnException) {
-        IllegalArgumentException failure = new IllegalArgumentException("decoder failed");
+        MessageDecodeException failure = new MessageDecodeException("decoder failed", new byte[0], null);
         TestConnection connection = connect(closeOnException, configurer -> configurer.setMessageDecoder(_ -> {
             throw failure;
         }));
@@ -40,6 +43,23 @@ class FailureHandlingTest {
         Util.sendFromClient(connection.channel(), new TextWebSocketFrame("message"));
 
         assertFailureWasReportedAndSessionClosedWithStatus(connection, failure, closeOnException, WebSocketCloseStatus.INVALID_PAYLOAD_DATA);
+    }
+
+    @Test
+    void shouldReportDecoderFailureWithPayloadOfMessage() {
+        IllegalArgumentException failure = new IllegalArgumentException("decoder failed");
+        TestConnection connection = connect(false, configurer -> configurer.setMessageDecoder(_ -> {
+            throw failure;
+        }));
+
+        Util.sendFromClient(connection.channel(), new TextWebSocketFrame("message"));
+
+        MessageDecodeException reported = assertThat(connection.observedFailures())
+            .singleElement()
+            .asInstanceOf(type(MessageDecodeException.class))
+            .actual();
+        assertThat(reported).as("Should keep the decoder failure").hasCause(failure);
+        assertThat(reported.getPayload()).as("Should carry the payload").isEqualTo("message".getBytes(StandardCharsets.UTF_8));
     }
 
     @ParameterizedTest

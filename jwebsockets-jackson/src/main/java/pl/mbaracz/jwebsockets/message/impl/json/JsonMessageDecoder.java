@@ -3,6 +3,7 @@ package pl.mbaracz.jwebsockets.message.impl.json;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import pl.mbaracz.jwebsockets.message.MessageDecodeException;
 import pl.mbaracz.jwebsockets.message.MessageDecoder;
 
 import java.io.IOException;
@@ -79,7 +80,7 @@ public class JsonMessageDecoder<T> implements MessageDecoder<T> {
         try {
             return mapper.readValue(data, type);
         } catch (IOException exception) {
-            throw new RuntimeException("Failed to decode message from JSON", exception);
+            throw new MessageDecodeException("Failed to decode message from JSON", data, exception);
         }
     }
 }

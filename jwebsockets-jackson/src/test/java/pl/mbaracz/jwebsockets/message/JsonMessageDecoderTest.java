@@ -42,12 +42,16 @@ public class JsonMessageDecoderTest {
     }
 
     @Test
-    void shouldThrowRuntimeExceptionWhenEmptyJsonIsDecoded() {
+    void shouldThrowMessageDecodeExceptionWhenEmptyJsonIsDecoded() {
         // given
         String emptyJson = "";
 
         // when / then
-        assertThatThrownBy(() -> decoder.decode(emptyJson.getBytes())).isInstanceOf(RuntimeException.class);
+        assertThatThrownBy(() -> decoder.decode(emptyJson.getBytes()))
+            .isInstanceOfSatisfying(
+                MessageDecodeException.class,
+                exception -> assertThat(exception.getPayload()).isEqualTo(emptyJson.getBytes())
+            );
     }
 
     @Test

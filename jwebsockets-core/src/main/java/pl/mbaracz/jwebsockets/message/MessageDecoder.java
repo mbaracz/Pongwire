@@ -13,6 +13,7 @@ public interface MessageDecoder<T> {
      *
      * @param data the byte array containing the encoded message.
      * @return the decoded WebSocket message.
+     * @throws MessageDecodeException if the data is not a valid message. The server wraps other exceptions in one.
      */
     T decode(byte[] data);
 

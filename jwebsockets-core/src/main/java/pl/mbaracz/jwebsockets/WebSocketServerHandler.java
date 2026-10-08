@@ -29,6 +29,7 @@ import pl.mbaracz.jwebsockets.handler.OpenHandler;
 import pl.mbaracz.jwebsockets.handler.UpgradeHandler;
 import pl.mbaracz.jwebsockets.handler.UpgradeResult;
 import pl.mbaracz.jwebsockets.handler.WritabilityHandler;
+import pl.mbaracz.jwebsockets.message.MessageDecodeException;
 import pl.mbaracz.jwebsockets.message.MessageDecoder;
 import pl.mbaracz.jwebsockets.message.MessageEncoder;
 
@@ -589,7 +590,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         try {
             message = decoder.decode(bytes);
         } catch (RuntimeException exception) {
-            handleFailure(session.getChannelContext(), exception, true, WebSocketCloseStatus.INVALID_PAYLOAD_DATA);
+            MessageDecodeException failure = exception instanceof MessageDecodeException decodeException
+                ? decodeException
+                : new MessageDecodeException("Failed to decode message", bytes, exception);
+
+            handleFailure(session.getChannelContext(), failure, true, WebSocketCloseStatus.INVALID_PAYLOAD_DATA);
             return;
         }
         session.updateLastMessageTime();

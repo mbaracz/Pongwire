@@ -93,7 +93,7 @@ class ServerObserverTest {
         Util.sendFromClient(channel, new TextWebSocketFrame("hello"));
 
         assertThat(events).as("Exception should be reported instead of the message")
-            .containsExactly("opened", "exception malformed");
+            .containsExactly("opened", "exception Failed to decode message");
     }
 
     @Test
