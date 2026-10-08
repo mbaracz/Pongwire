@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 
 /**
  * Represents a WebSocket session with a client, maintaining connection details and enabling message sending.
@@ -129,7 +130,7 @@ public class WebSocketSession<T, D> {
         CompletableFuture<Void> result = new CompletableFuture<>();
 
         try {
-            messageSender.apply(message, channelContext).addListener(write -> {
+            whenDone(messageSender.apply(message, channelContext), write -> {
                 if (write.isSuccess()) {
                     result.complete(null);
                 } else {
@@ -157,9 +158,23 @@ public class WebSocketSession<T, D> {
         CloseWebSocketFrame closeFrame = new CloseWebSocketFrame(code, reason);
         CompletableFuture<Void> result = new CompletableFuture<>();
 
-        ClosingHandshake.start(channelContext.channel(), closeFrame, closeTimeout)
-            .addListener(_ -> result.complete(null));
+        whenDone(ClosingHandshake.start(channelContext.channel(), closeFrame, closeTimeout), _ -> result.complete(null));
 
         return result;
+    }
+
+    /**
+     * Runs the action once the future is done. A completed future is handled right away, because a future of a
+     * terminated event loop, e.g. after the server stopped, cannot notify its listeners anymore.
+     *
+     * @param future the future to wait for.
+     * @param action the action receiving the done future.
+     */
+    private static void whenDone(ChannelFuture future, Consumer<ChannelFuture> action) {
+        if (future.isDone()) {
+            action.accept(future);
+        } else {
+            future.addListener(_ -> action.accept(future));
+        }
     }
 }

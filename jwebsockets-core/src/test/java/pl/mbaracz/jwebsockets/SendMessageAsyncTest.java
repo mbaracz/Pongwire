@@ -269,6 +269,46 @@ class SendMessageAsyncTest {
     }
 
     @Test
+    @Timeout(20)
+    void shouldCompleteStagesWhenSessionIsUsedAfterServerStopped() throws Exception {
+        CountDownLatch sessionOpened = new CountDownLatch(1);
+        ExecutorService clientExecutor = Executors.newSingleThreadExecutor();
+        WebSocket client = null;
+
+        try {
+            server
+                .onOpen(session -> {
+                    opened.add(session);
+                    sessionOpened.countDown();
+                })
+                .listen(0);
+            client = HttpClient.newBuilder()
+                .executor(clientExecutor)
+                .build()
+                .newWebSocketBuilder()
+                .buildAsync(URI.create("ws://127.0.0.1:" + server.getLocalAddress().getPort()), new WebSocket.Listener() {
+                })
+                .get(5, TimeUnit.SECONDS);
+            assertThat(sessionOpened.await(5, TimeUnit.SECONDS)).isTrue();
+
+            // The event loops are terminated once stop() returns
+            server.stop();
+            WebSocketSession<String, Object> session = opened.getFirst();
+            CompletableFuture<Void> send = session.sendMessageAsync("late").toCompletableFuture();
+            CompletableFuture<Void> close = session.close(1000, "late").toCompletableFuture();
+
+            assertThatThrownBy(() -> send.get(5, TimeUnit.SECONDS)).as("Send should fail").cause().isNotNull();
+            assertThat(close).as("Close should complete").succeedsWithin(5, TimeUnit.SECONDS);
+        } finally {
+            if (client != null) {
+                client.abort();
+            }
+            clientExecutor.shutdownNow();
+            assertThat(clientExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
     void shouldCompleteSendMessageAsyncExceptionallyWhenWriteFails() {
         EmbeddedChannel channel = Util.connect(server);
 
