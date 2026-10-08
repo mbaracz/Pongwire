@@ -64,6 +64,9 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
             channel.config().setWriteBufferWaterMark(new WriteBufferWaterMark(lowWaterMark, highWaterMark));
         }
 
+        // Closest to the transport, so it also holds back the reads requested by the handlers after it
+        pipeline.addLast(new ReadGate());
+
         if (sslContext != null) {
             pipeline.addLast(sslContext.newHandler(channel.alloc()));
         }

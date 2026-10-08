@@ -71,6 +71,7 @@ class PublicApiTest {
             ClosingHandshake.class,
             CloseInfo.class,
             InMemoryTopicBroker.class,
+            ReadGate.class,
             ReservedBitsValidator.class,
             SerialExecutor.class,
             SessionRegistry.class,

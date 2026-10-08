@@ -1,7 +1,10 @@
 package pl.mbaracz.jwebsockets;
 
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
@@ -12,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -117,5 +121,36 @@ class InboundBackpressureTest {
         send(channel, 1);
 
         assertThat(channel.config().isAutoRead()).as("Should keep reading").isTrue();
+    }
+
+    @Test
+    void shouldHoldBackReadsRequestedByHandlersWhenPendingCallbacksReachMaximum() {
+        EmbeddedChannel channel = Util.connect(server);
+        send(channel, 4);
+        AtomicInteger reads = countReads(channel);
+
+        // The frame aggregator requests a read itself while a fragmented message is incomplete
+        channel.pipeline().context(WebSocketFrameAggregator.class).read();
+
+        assertThat(reads).as("Read should be held back").hasValue(0);
+
+        runCallbacks(channel, 2);
+
+        assertThat(reads.get()).as("Resuming should read again").isPositive();
+    }
+
+    /**
+     * Counts the read requests that reach the transport.
+     */
+    private static AtomicInteger countReads(EmbeddedChannel channel) {
+        AtomicInteger reads = new AtomicInteger();
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void read(ChannelHandlerContext context) {
+                reads.incrementAndGet();
+                context.read();
+            }
+        });
+        return reads;
     }
 }

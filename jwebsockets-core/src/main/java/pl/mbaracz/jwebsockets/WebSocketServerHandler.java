@@ -1053,7 +1053,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         int maxPending = webSocketServer.getConfiguration().getMaxPendingCallbacks();
 
         if (pendingCallbacks.incrementAndGet() >= maxPending) {
-            context.channel().config().setAutoRead(false);
+            ReadGate.setReading(context, false);
         }
 
         callbackExecutor.execute(() -> {
@@ -1164,7 +1164,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      */
     private void resumeReading(ChannelHandlerContext context, int maxPending) {
         if (pendingCallbacks.get() <= maxPending / 2) {
-            context.channel().config().setAutoRead(true);
+            ReadGate.setReading(context, true);
         }
     }
 
