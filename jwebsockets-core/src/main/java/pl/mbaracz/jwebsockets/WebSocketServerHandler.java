@@ -1166,7 +1166,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
         try {
             notification.accept(observer);
-        } catch (RuntimeException exception) {
+        } catch (Throwable exception) {
             // Not passed to exceptionCaught(), which could close the connection
             LOGGER.warn("WebSocket server observer failed", exception);
         }
@@ -1185,7 +1185,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
         try {
             errorHandler.handle(openedSession, exception);
-        } catch (RuntimeException handlerException) {
+        } catch (Throwable handlerException) {
             LOGGER.warn("WebSocket error handler failed", handlerException);
         }
     }

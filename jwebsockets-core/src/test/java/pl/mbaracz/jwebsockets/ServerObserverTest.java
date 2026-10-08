@@ -109,7 +109,7 @@ class ServerObserverTest {
             .observer(new WebSocketServerObserver<>() {
                 @Override
                 public void messageReceived(WebSocketSession<String, Object> session) {
-                    throw new IllegalStateException("observer failed");
+                    throw new AssertionError("observer failed");
                 }
             });
         EmbeddedChannel channel = Util.connect(server);

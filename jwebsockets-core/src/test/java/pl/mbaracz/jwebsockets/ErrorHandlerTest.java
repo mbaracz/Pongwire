@@ -100,7 +100,7 @@ class ErrorHandlerTest {
             }),
             (_, _) -> {
                 handlerCalls.incrementAndGet();
-                throw new IllegalStateException("error handler failed");
+                throw new AssertionError("error handler failed");
             },
             new WebSocketServerObserver<>() {
                 @Override
