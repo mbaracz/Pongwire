@@ -91,9 +91,15 @@ var server = new WebSocketServer<ChatMessage, User>("/chat")
     );
 
 server.onMessage((session, message) ->
-    server.publish("chat", message)
+    server.publish("chat", message).exceptionally(failure -> {
+        log.warn("Could not publish the message", failure);
+        return null;
+    })
 );
 ```
+
+The stages returned by `publish`, `subscribe` and `unsubscribe` are the only place where topic broker failures are
+reported, so handle them.
 
 `UpgradeRequest` gives access to the request path, query parameters, cookies, and headers.
 
@@ -121,6 +127,26 @@ server.configure(config -> config.setCallbackExecutor(executor));
 - The application owns the configured executor and is responsible for shutting it down.
 
 ## Production behavior
+
+### Error handling
+
+Failures are reported to `onError` and to the observer, with the session or `null` before the session was opened.
+
+| Failure                                          | `onError` receives                        | Logged at |
+|--------------------------------------------------|-------------------------------------------|-----------|
+| Message the decoder cannot decode                | `MessageDecodeException` with the payload | DEBUG     |
+| Exception thrown by a callback or the encoder    | The exception                             | ERROR     |
+| Connection reset or WebSocket protocol violation | The exception                             | DEBUG     |
+| Callback rejected by the callback executor       | `RejectedExecutionException`              | ERROR     |
+
+By default (`closeOnException` is `false`) the session stays open after a failure and the failed message is dropped.
+With `closeOnException` enabled, an open session is closed with `1007` when its message cannot be decoded and with
+`1011` on other server-side failures. A broken connection or a protocol violation closes the connection without a
+close frame of its own. Netty already answered the violation with `1002` or `1009`.
+
+Independently of this setting, a session whose callback the executor rejects is closed with `1013`, an exception thrown
+by `onUpgrade` is answered with `500`, and a send to a session that is already closed only fails the stage returned by
+`sendMessageAsync`.
 
 ### Heartbeat and idle timeout
 
