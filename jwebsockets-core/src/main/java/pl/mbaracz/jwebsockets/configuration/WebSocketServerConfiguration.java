@@ -496,6 +496,7 @@ public final class WebSocketServerConfiguration<T> {
          * Sets the executor for the onOpen, onMessage, onWritabilityChanged and onClose callbacks, so they can block
          * without stopping the event loop. The callbacks of one session still run one at a time and in order.
          * The server never shuts the executor down, its lifecycle belongs to the application.
+         * A session whose callback the executor rejects is closed with 1013, and a rejected onClose callback runs on the event loop instead.
          *
          * @param callbackExecutor Callback executor, or null to run the callbacks on the event loop (default).
          * @return This builder.

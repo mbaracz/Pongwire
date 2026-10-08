@@ -44,6 +44,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -1006,13 +1007,18 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     /**
      * Runs an application callback on the callback executor after the earlier callbacks of this connection,
      * or right away on the event loop if no executor is configured.
+     * A failure of the callback is reported like any other connection failure, whatever thread the callback ran on.
      *
      * @param context  the channel handler context.
      * @param callback the application callback.
      */
     private void runCallback(ChannelHandlerContext context, Runnable callback) {
         if (callbackExecutor == null) {
-            callback.run();
+            try {
+                callback.run();
+            } catch (Throwable failure) {
+                handleFailure(context, failure);
+            }
             return;
         }
 
@@ -1026,20 +1032,69 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             callbackExecutor.execute(() -> {
                 try {
                     callback.run();
-                } catch (RuntimeException exception) {
-                    // Report the failure like one thrown on the event loop, the next callbacks still run
-                    context.pipeline().fireExceptionCaught(exception);
+                } catch (Throwable failure) {
+                    // The next callbacks still run
+                    reportCallbackFailure(context, failure);
                 } finally {
                     if (pendingCallbacks.decrementAndGet() == maxPending / 2) {
                         context.executor().execute(() -> resumeReading(context, maxPending));
                     }
                 }
             });
-        } catch (RuntimeException exception) {
+        } catch (RejectedExecutionException exception) {
             // A rejected callback never runs, so it must not keep the connection from reading
             pendingCallbacks.decrementAndGet();
             resumeReading(context, maxPending);
-            throw exception;
+            handleRejectedCallback(context, callback, exception);
+        }
+    }
+
+    /**
+     * Reports a callback failure on the event loop, where the handler state may be accessed.
+     * Once the event loop is terminated, only the error handler and the observer are notified.
+     *
+     * @param context the channel handler context.
+     * @param failure the failure of the callback.
+     */
+    private void reportCallbackFailure(ChannelHandlerContext context, Throwable failure) {
+        try {
+            context.executor().execute(() -> handleFailure(context, failure));
+        } catch (RejectedExecutionException exception) {
+            LOGGER.error("Callback failed in channel with id {}", context.channel().id(), failure);
+            notifyErrorHandler(failure);
+            notifyObserver(observer -> observer.exception(openedSession, failure));
+        }
+    }
+
+    /**
+     * Handles a callback the callback executor did not accept. The callback of a closed session, such as onClose,
+     * runs on the event loop instead, so the application can still clean up.
+     * An open session cannot be served anymore and is closed with 1013 (try again later), whatever the closeOnException setting.
+     *
+     * @param context   the channel handler context.
+     * @param callback  the rejected callback.
+     * @param exception the rejection.
+     */
+    private void handleRejectedCallback(ChannelHandlerContext context, Runnable callback, RejectedExecutionException exception) {
+        if (closeHandled) {
+            try {
+                callback.run();
+            } catch (Throwable failure) {
+                handleFailure(context, failure);
+            }
+            return;
+        }
+
+        // Reported without the close policy, which could close the connection before the close frame is sent
+        LOGGER.error("Callback executor rejected a callback in channel with id {}", context.channel().id(), exception);
+        notifyErrorHandler(exception);
+        notifyObserver(observer -> observer.exception(openedSession, exception));
+
+        if (openedSession != null) {
+            CloseWebSocketFrame frame = new CloseWebSocketFrame(WebSocketCloseStatus.TRY_AGAIN_LATER);
+            ClosingHandshake.start(context.channel(), frame, webSocketServer.getConfiguration().getCloseTimeout());
+        } else {
+            context.close();
         }
     }
 
