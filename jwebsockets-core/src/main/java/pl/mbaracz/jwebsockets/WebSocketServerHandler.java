@@ -160,8 +160,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                 write = context.channel().newFailedFuture(exception);
             }
 
+            // A send racing the closure of the session fails only the caller's stage, the session was already reported closed
             write.addListener(result -> {
-                if (!result.isSuccess()) {
+                if (!result.isSuccess() && !closeHandled && context.channel().isActive()) {
                     handleFailure(context, result.cause());
                 }
             });

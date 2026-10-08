@@ -68,6 +68,24 @@ class ErrorHandlerTest {
         assertFailureReportedToHandlerAndObserver(calls, connection.session(), failure);
     }
 
+    @Test
+    void shouldNotReportSendFailureWhenConnectionClosedWithoutCloseFrame() {
+        List<FailureCall> calls = new ArrayList<>();
+        TestConnection connection = connect(
+            false,
+            _ -> {},
+            (session, exception) -> calls.add(new FailureCall("handler", session, exception)),
+            observerRecording(calls)
+        );
+
+        // The connection drops without a close frame, then a late message is sent to the closed session
+        connection.channel().close();
+        CompletableFuture<Void> send = connection.session().sendMessageAsync("message").toCompletableFuture();
+
+        assertThatThrownBy(send::join).as("Send should still fail").isInstanceOf(CompletionException.class);
+        assertThat(calls).as("Closed session should not report the failure").isEmpty();
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void shouldIgnoreErrorHandlerFailureAndApplyOriginalClosePolicy(boolean closeOnException) {
