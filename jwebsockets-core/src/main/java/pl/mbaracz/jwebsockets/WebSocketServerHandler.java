@@ -374,6 +374,16 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     }
 
     /**
+     * Reports a failure of an application callback, a server-side failure whatever the type of the exception.
+     *
+     * @param context the channel handler context.
+     * @param failure the failure of the callback.
+     */
+    private void handleCallbackFailure(ChannelHandlerContext context, Throwable failure) {
+        handleFailure(context, failure, false, WebSocketCloseStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    /**
      * Reports a connection failure and applies the configured close policy. Failures caused by the client are logged
      * without a stack trace at debug level, so a client cannot flood the log, the others at error level.
      *
@@ -417,6 +427,10 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         if (closeStatus != null && openedSession != null && !closeHandled) {
             CloseWebSocketFrame frame = new CloseWebSocketFrame(closeStatus);
             ClosingHandshake.start(context.channel(), frame, webSocketServer.getConfiguration().getCloseTimeout());
+        } else if (cause instanceof DecoderException && openedSession != null) {
+            // Netty closes the connection once its close frame for the protocol violation is written,
+            // closing right away could drop that frame, so only the wait for it is bounded
+            ClosingHandshake.closeAfter(context.channel(), webSocketServer.getConfiguration().getCloseTimeout());
         } else {
             context.close();
         }
@@ -726,7 +740,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             } catch (RuntimeException exception) {
                 // Reported once the response is written, as closeOnException must not drop the pending response
                 sendResponse(context, HttpResponseStatus.INTERNAL_SERVER_ERROR)
-                    .addListener(_ -> handleFailure(context, exception));
+                    .addListener(_ -> handleCallbackFailure(context, exception));
                 return;
             }
 
@@ -1031,7 +1045,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             try {
                 callback.run();
             } catch (Throwable failure) {
-                handleFailure(context, failure);
+                handleCallbackFailure(context, failure);
             }
             return;
         }
@@ -1097,7 +1111,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      */
     private void reportCallbackFailure(ChannelHandlerContext context, Throwable failure) {
         try {
-            context.executor().execute(() -> handleFailure(context, failure));
+            context.executor().execute(() -> handleCallbackFailure(context, failure));
         } catch (RejectedExecutionException exception) {
             LOGGER.error("Callback failed in channel with id {}", context.channel().id(), failure);
             notifyErrorHandler(failure);
@@ -1119,7 +1133,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             try {
                 callback.run();
             } catch (Throwable failure) {
-                handleFailure(context, failure);
+                handleCallbackFailure(context, failure);
             }
             return;
         }

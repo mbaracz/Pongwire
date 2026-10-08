@@ -4,7 +4,9 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.CorruptedWebSocketFrameException;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import io.netty.util.ReferenceCountUtil;
@@ -23,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -127,6 +130,41 @@ class FailureHandlingTest {
         // A broken connection cannot carry a close frame
         assertThat(Util.readFromServer(connection.channel())).as("Should not send a close frame").isNull();
         assertFailureWasReportedAndConnectionStateMatchesConfiguration(connection, failure, closeOnException);
+    }
+
+    @Test
+    void shouldReportMessageHandlerFailureAsServerFailureWhateverItsType() {
+        // A Netty exception type thrown by the application is still a failure of the server
+        DecoderException failure = new DecoderException("handler failed");
+        TestConnection connection = connect(true, _ -> {}, (_, _) -> {
+            throw failure;
+        });
+
+        Util.sendFromClient(connection.channel(), new TextWebSocketFrame("message"));
+
+        assertFailureWasReportedAndSessionClosedWithStatus(connection, failure, true, WebSocketCloseStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @Test
+    void shouldWaitForNettyCloseFrameWhenProtocolIsViolated() {
+        TestConnection connection = connect(true, _ -> {});
+        EmbeddedChannel channel = connection.channel();
+        channel.freezeTime();
+
+        // The close frame Netty wrote for the violation is still waiting behind a client that does not read
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+            }
+        });
+        channel.pipeline().fireExceptionCaught(new CorruptedWebSocketFrameException(WebSocketCloseStatus.PROTOCOL_ERROR, "unmasked"));
+
+        assertThat(channel.isOpen()).as("Should not drop the pending close frame").isTrue();
+
+        channel.advanceTimeBy(5, TimeUnit.SECONDS);
+        channel.runScheduledPendingTasks();
+
+        assertThat(channel.isOpen()).as("Should close after the close timeout").isFalse();
     }
 
     private static void assertSendFailedWith(CompletableFuture<Void> send, Throwable failure) {
