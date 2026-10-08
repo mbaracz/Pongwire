@@ -27,6 +27,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
@@ -403,8 +404,29 @@ public class WebSocketServer<T, D> {
         return sessionTopicRegistry.getTopics();
     }
 
+    /**
+     * Delivers a topic message to the subscribers with one task per event loop, so the publishing thread does not
+     * write to every subscriber itself. The task is queued even on the current event loop, so each subscriber
+     * receives the messages of a topic in the order of the broker.
+     *
+     * @param topic   the topic of the message.
+     * @param message the message.
+     */
     private void handleTopicMessage(String topic, T message) {
-        sessionTopicRegistry.getSubscribers(topic).forEach(session -> session.sendMessage(message));
+        Map<EventExecutor, List<WebSocketSession<T, D>>> subscribersByLoop = new HashMap<>();
+
+        for (WebSocketSession<T, D> session : sessionTopicRegistry.getSubscribers(topic)) {
+            subscribersByLoop.computeIfAbsent(session.getChannelContext().executor(), _ -> new ArrayList<>()).add(session);
+        }
+
+        subscribersByLoop.forEach((loop, sessions) -> {
+            try {
+                loop.execute(() -> sessions.forEach(session -> session.sendMessage(message)));
+            } catch (RejectedExecutionException exception) {
+                // The event loop is shutting down and closes its sessions
+                LOGGER.debug("Dropped topic message for {} sessions on a terminated event loop", sessions.size());
+            }
+        });
     }
 
     private PendingBrokerOperation prepareBrokerSubscribeAfterUnsubscribe(

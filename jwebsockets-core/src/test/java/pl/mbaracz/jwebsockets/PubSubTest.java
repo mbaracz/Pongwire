@@ -10,7 +10,10 @@ import org.junit.jupiter.api.Test;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.InstanceOfAssertFactories.type;
 
 class PubSubTest {
 
@@ -50,6 +53,7 @@ class PubSubTest {
         // Publish message
         String message = "topic-1-message";
         server.publish(topic, message);
+        channel.runPendingTasks();
 
         // Read outgoing frame
         TextWebSocketFrame textWebSocketFrame = channel.readOutbound();
@@ -76,6 +80,7 @@ class PubSubTest {
         String topic = "topic-2";
         String message = "topic-2-message";
         server.publish(topic, message);
+        channel.runPendingTasks();
 
         // Assert outgoing frame is null
         assertThat(channel.<Object>readOutbound()).as("Outgoing frame should be null").isNull();
@@ -100,6 +105,7 @@ class PubSubTest {
         // Publish message
         String message = "topic-2-message";
         server.publish(topic, message);
+        channel.runPendingTasks();
 
         // Assert outgoing frame is null
         TextWebSocketFrame textWebSocketFrame = channel.readOutbound();
@@ -109,6 +115,7 @@ class PubSubTest {
         // Unsubscribe and publish again
         server.unsubscribe(session, topic);
         server.publish(topic, message);
+        channel.runPendingTasks();
 
         // Assert outgoing frame is null
         assertThat(channel.<Object>readOutbound()).as("Outgoing frame should be null").isNull();
@@ -193,5 +200,49 @@ class PubSubTest {
         assertThat(server.isSubscribed(firstSession, sharedTopic)).as("First session should be unsubscribed").isFalse();
         assertThat(server.getTopics()).as("Topic without subscribers should be removed").doesNotContain(ownTopic);
         assertThat(server.isSubscribed(secondSession, sharedTopic)).as("Second session should stay subscribed").isTrue();
+    }
+
+    @Test
+    void shouldQueueTopicMessageWhenPublishedOnSubscribersEventLoop() {
+        EmbeddedChannel channel = Util.connect(server);
+        server.subscribe(server.getSessionByChannelId(channel.id()), "topic");
+
+        // An embedded channel treats every thread as its event loop, like a message handler publishing. Writing
+        // right away would overtake deliveries other threads queued on the loop before, out of the broker order.
+        server.publish("topic", "message");
+
+        assertThat(channel.<Object>readOutbound()).as("Topic message should wait for the event loop").isNull();
+
+        channel.runPendingTasks();
+
+        assertThat(Util.readFromServer(channel))
+            .as("Topic message should be delivered by the event loop")
+            .asInstanceOf(type(TextWebSocketFrame.class))
+            .satisfies(frame -> assertThat(frame.text()).isEqualTo("message"))
+            .satisfies(TextWebSocketFrame::release);
+    }
+
+    @Test
+    void shouldDeliverTopicMessageToSubscribersOnEveryEventLoop() {
+        EmbeddedChannel firstChannel = Util.newEmbeddedChannel(DefaultChannelId.newInstance(), new WebSocketServerChannelInitializer<>(server));
+        EmbeddedChannel secondChannel = Util.newEmbeddedChannel(DefaultChannelId.newInstance(), new WebSocketServerChannelInitializer<>(server));
+        Util.performHandshake(firstChannel, "/");
+        Util.performHandshake(secondChannel, "/");
+        firstChannel.releaseOutbound();
+        secondChannel.releaseOutbound();
+        server.subscribe(server.getSessionByChannelId(firstChannel.id()), "topic");
+        server.subscribe(server.getSessionByChannelId(secondChannel.id()), "topic");
+
+        server.publish("topic", "message");
+        firstChannel.runPendingTasks();
+        secondChannel.runPendingTasks();
+
+        for (EmbeddedChannel channel : List.of(firstChannel, secondChannel)) {
+            assertThat(Util.readFromServer(channel))
+                .as("Every subscriber should receive the message")
+                .asInstanceOf(type(TextWebSocketFrame.class))
+                .satisfies(frame -> assertThat(frame.text()).isEqualTo("message"))
+                .satisfies(TextWebSocketFrame::release);
+        }
     }
 }
