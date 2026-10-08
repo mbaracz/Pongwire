@@ -6,6 +6,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.HttpRequestEncoder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import pl.mbaracz.jwebsockets.handler.UpgradeResult;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
@@ -107,5 +108,21 @@ class HandshakeTimeoutTest {
 
         assertThat(channel.isOpen()).as("Connection should stay open").isTrue();
         assertThat(server.getConnectedSessions()).as("Session should be registered").hasSize(1);
+    }
+
+    @Test
+    void shouldCloseConnectionWhenUpgradeHandlerFinishesAfterTimeout() {
+        EmbeddedChannel channel = newChannel();
+        server.onUpgrade((_, _) -> {
+            // A slow upgrade handler, e.g. waiting for an authentication service
+            channel.advanceTimeBy(11, TimeUnit.SECONDS);
+            return UpgradeResult.accept(null);
+        });
+
+        channel.writeInbound(encodeRequest());
+        channel.releaseOutbound();
+
+        assertThat(channel.isOpen()).as("Connection should be closed").isFalse();
+        assertThat(server.getConnectedSessions()).as("No session should be registered").isEmpty();
     }
 }

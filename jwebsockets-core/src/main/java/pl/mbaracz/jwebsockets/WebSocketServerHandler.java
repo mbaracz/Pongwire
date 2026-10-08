@@ -755,7 +755,10 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         }
 
         handshakeFuture.addListener(it -> {
-            if (it.isSuccess()) {
+            // The upgrade handler may run past the deadline, and cancelling the overdue timeout would keep the connection
+            if (it.isSuccess() && handshakeTimeout != null && handshakeTimeout.getDelay(TimeUnit.NANOSECONDS) <= 0) {
+                context.close();
+            } else if (it.isSuccess()) {
                 cancelHandshakeTimeout();
                 // Netty inserts the encoder before its decoder. Intercept closes between them so
                 // frames written by the decoder and by every later handler retain their status.
