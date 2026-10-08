@@ -497,6 +497,7 @@ public final class WebSocketServerConfiguration<T> {
          * without stopping the event loop. The callbacks of one session still run one at a time and in order.
          * The server never shuts the executor down, its lifecycle belongs to the application.
          * A session whose callback the executor rejects is closed with 1013, and a rejected onClose callback runs on the event loop instead.
+         * An executor that runs tasks on the submitting thread, e.g. with CallerRunsPolicy, can run callbacks on the event loop.
          *
          * @param callbackExecutor Callback executor, or null to run the callbacks on the event loop (default).
          * @return This builder.

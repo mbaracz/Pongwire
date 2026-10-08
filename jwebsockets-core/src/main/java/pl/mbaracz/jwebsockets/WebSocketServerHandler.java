@@ -72,7 +72,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
     // Runs the application callbacks of this connection one at a time and in order,
     // null to run them on the event loop
-    private final Executor callbackExecutor;
+    private final SerialExecutor callbackExecutor;
 
     // Callbacks submitted to the callback executor that have not finished yet.
     // Reading from the connection stops at the configured maximum and resumes
@@ -1042,24 +1042,49 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             context.channel().config().setAutoRead(false);
         }
 
-        try {
-            callbackExecutor.execute(() -> {
-                try {
-                    callback.run();
-                } catch (Throwable failure) {
-                    // The next callbacks still run
-                    reportCallbackFailure(context, failure);
-                } finally {
-                    if (pendingCallbacks.decrementAndGet() == maxPending / 2) {
-                        context.executor().execute(() -> resumeReading(context, maxPending));
-                    }
+        callbackExecutor.execute(() -> {
+            try {
+                callback.run();
+            } catch (Throwable failure) {
+                // The next callbacks still run
+                reportCallbackFailure(context, failure);
+            } finally {
+                if (pendingCallbacks.decrementAndGet() == maxPending / 2) {
+                    context.executor().execute(() -> resumeReading(context, maxPending));
                 }
-            });
-        } catch (RejectedExecutionException exception) {
+            }
+        }, exception -> {
             // A rejected callback never runs, so it must not keep the connection from reading
             pendingCallbacks.decrementAndGet();
-            resumeReading(context, maxPending);
-            handleRejectedCallback(context, callback, exception);
+            onEventLoop(context, () -> {
+                resumeReading(context, maxPending);
+                handleRejectedCallback(context, callback, exception);
+            }, callback);
+        });
+    }
+
+    /**
+     * Runs the task on the event loop, right away if called on it.
+     * Once the event loop is terminated, runs the fallback on the calling thread instead.
+     *
+     * @param context  the channel handler context.
+     * @param task     the task to run on the event loop.
+     * @param fallback the task to run if the event loop is terminated.
+     */
+    private static void onEventLoop(ChannelHandlerContext context, Runnable task, Runnable fallback) {
+        if (context.executor().inEventLoop()) {
+            task.run();
+            return;
+        }
+
+        try {
+            context.executor().execute(task);
+        } catch (RejectedExecutionException exception) {
+            try {
+                fallback.run();
+            } catch (Throwable failure) {
+                LOGGER.error("Callback failed in channel with id {}", context.channel().id(), failure);
+            }
         }
     }
 
@@ -1096,6 +1121,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             } catch (Throwable failure) {
                 handleFailure(context, failure);
             }
+            return;
+        }
+
+        // The first rejection already closes the session, the callbacks queued after it are dropped
+        if (ClosingHandshake.isClosing(context.channel())) {
             return;
         }
 

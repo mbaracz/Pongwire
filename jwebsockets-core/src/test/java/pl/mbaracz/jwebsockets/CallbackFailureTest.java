@@ -128,4 +128,29 @@ class CallbackFailureTest {
 
         assertThat(closeCodes).as("Close handler should still run").containsExactly(WebSocketCloseStatus.ABNORMAL_CLOSURE.code());
     }
+
+    @Test
+    void shouldCloseSessionOnceAndKeepReadingWhenExecutorRejectsQueuedMessages() {
+        List<String> received = new ArrayList<>();
+        server
+            .configure(configurer -> configurer.setMaxPendingCallbacks(2))
+            .onMessage((_, message) -> received.add(message));
+        EmbeddedChannel channel = Util.connect(server);
+        Util.sendFromClient(channel, new TextWebSocketFrame("first"), new TextWebSocketFrame("second"), new TextWebSocketFrame("third"));
+        assertThat(channel.config().isAutoRead()).as("Reading should be paused").isFalse();
+
+        // The executor shuts down while the first message is handled, the queued ones are rejected later
+        executorShutDown = true;
+        runCallbacks(channel);
+
+        CloseWebSocketFrame closeFrame = assertThat(Util.readFromServer(channel))
+            .as("Should send a close frame")
+            .asInstanceOf(type(CloseWebSocketFrame.class))
+            .actual();
+        assertThat(closeFrame.statusCode()).as("Close status").isEqualTo(WebSocketCloseStatus.TRY_AGAIN_LATER.code());
+        closeFrame.release();
+        assertThat(errors).as("Rejection should be reported once").singleElement().isInstanceOf(RejectedExecutionException.class);
+        assertThat(channel.config().isAutoRead()).as("Rejected callbacks should not keep reading paused").isTrue();
+        assertThat(received).as("Only the first message should be handled").containsExactly("first");
+    }
 }

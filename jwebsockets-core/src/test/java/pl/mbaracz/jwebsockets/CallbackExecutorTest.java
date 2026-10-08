@@ -5,17 +5,19 @@ import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class CallbackExecutorTest {
 
@@ -182,9 +184,10 @@ class CallbackExecutorTest {
     }
 
     @Test
-    void shouldFailSubmissionWithoutStallingSerialExecutorWhenCallbackExecutorRejectsTask() {
+    void shouldPassRejectedTaskToItsHandlerWithoutStallingSerialExecutor() {
         AtomicBoolean rejecting = new AtomicBoolean(true);
         List<String> executed = new ArrayList<>();
+        List<String> rejected = new ArrayList<>();
 
         // Rejects tasks like a shutdown executor until told otherwise, then runs them right away
         SerialExecutor executor = new SerialExecutor(task -> {
@@ -195,11 +198,56 @@ class CallbackExecutorTest {
             task.run();
         });
 
-        assertThatThrownBy(() -> executor.execute(() -> executed.add("rejected"))).isInstanceOf(RejectedExecutionException.class);
-
+        executor.execute(() -> executed.add("rejected"), _ -> rejected.add("rejected"));
         rejecting.set(false);
-        executor.execute(() -> executed.add("accepted"));
+        executor.execute(() -> executed.add("accepted"), _ -> rejected.add("accepted"));
 
-        assertThat(executed).as("Tasks submitted after a rejection should still run").isEqualTo(List.of("accepted"));
+        assertThat(rejected).as("Rejected task should reach its handler").containsExactly("rejected");
+        assertThat(executed).as("Tasks submitted after a rejection should still run").containsExactly("accepted");
+    }
+
+    @Test
+    void shouldPassQueuedTasksToTheirHandlersWhenExecutorRejectsThemLater() {
+        Queue<Runnable> accepted = new ArrayDeque<>();
+        AtomicBoolean rejecting = new AtomicBoolean();
+        List<String> executed = new ArrayList<>();
+        List<String> rejected = new ArrayList<>();
+        SerialExecutor executor = new SerialExecutor(task -> {
+            if (rejecting.get()) {
+                throw new RejectedExecutionException("Executor is shut down");
+            }
+
+            accepted.add(task);
+        });
+
+        executor.execute(() -> executed.add("first"), _ -> rejected.add("first"));
+        executor.execute(() -> executed.add("second"), _ -> rejected.add("second"));
+        executor.execute(() -> executed.add("third"), _ -> rejected.add("third"));
+
+        // The executor shuts down while the first task runs
+        rejecting.set(true);
+        accepted.remove().run();
+
+        assertThat(executed).as("Only the first task should run").containsExactly("first");
+        assertThat(rejected).as("Every later task should reach its handler in order").containsExactly("second", "third");
+    }
+
+    @Test
+    @Timeout(5)
+    void shouldAcceptTasksWhileExecutorRunsTaskOnCallingThread() throws Exception {
+        CountDownLatch running = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        SerialExecutor executor = new SerialExecutor(Runnable::run);
+        Thread worker = Thread.ofPlatform().start(() -> executor.execute(() -> {
+            running.countDown();
+            awaitQuietly(release, 5000);
+        }, _ -> {}));
+
+        assertThat(running.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // Submitting must not wait for the task the executor runs on the worker thread
+        executor.execute(() -> {}, _ -> {});
+        release.countDown();
+        worker.join();
     }
 }
