@@ -19,6 +19,7 @@ import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -191,6 +192,49 @@ class PingPongTest {
         assertThat(frames).as("Should send the text and one Pong").hasSize(2);
         assertThat(frames.get(1)).as("Should answer the most recent Ping").isInstanceOf(PongWebSocketFrame.class);
         assertThat(frames.get(1).content().toString(StandardCharsets.UTF_8)).as("Pong payload").isEqualTo("latest");
+        frames.forEach(WebSocketFrame::release);
+    }
+
+    @Test
+    void shouldAnswerDeferredPingBeforeWritabilityHandlerFillsBufferAgain() {
+        AtomicBoolean refilled = new AtomicBoolean();
+        server
+            .configure(configurer -> configurer.setWriteBufferWaterMark(1024, 2048))
+            .onWritabilityChanged((session, writable) -> {
+                // Fills the buffer again once, like a sender resuming after backpressure
+                if (writable && refilled.compareAndSet(false, true)) {
+                    session.sendMessage("y".repeat(4096));
+                }
+            });
+        EmbeddedChannel channel = Util.connect(server);
+        OutboundGate gate = holdFlushes(channel);
+        channel.writeAndFlush(new TextWebSocketFrame("x".repeat(4096)));
+
+        Util.sendFromClient(channel, new PingWebSocketFrame(Unpooled.copiedBuffer("ping", StandardCharsets.UTF_8)));
+        gate.open(channel);
+
+        List<WebSocketFrame> frames = readAllFromServer(channel);
+
+        assertThat(frames).as("Should send the text, the Pong and the refill").hasSize(3);
+        assertThat(frames.get(1)).as("Pong should precede the refill").isInstanceOf(PongWebSocketFrame.class);
+        frames.forEach(WebSocketFrame::release);
+    }
+
+    @Test
+    void shouldSendDeferredPongOnceWhenItsWriteChangesWritability() {
+        // Every pending byte makes the channel unwritable, so writing the Pong changes the writability again
+        server.configure(configurer -> configurer.setWriteBufferWaterMark(1, 1));
+        EmbeddedChannel channel = Util.connect(server);
+        OutboundGate gate = holdFlushes(channel);
+        channel.writeAndFlush(new TextWebSocketFrame("text"));
+
+        Util.sendFromClient(channel, new PingWebSocketFrame(Unpooled.copiedBuffer("ping", StandardCharsets.UTF_8)));
+        gate.open(channel);
+
+        List<WebSocketFrame> frames = readAllFromServer(channel);
+
+        assertThat(frames).as("Should send the text and one Pong").hasSize(2);
+        assertThat(frames.get(1).content().toString(StandardCharsets.UTF_8)).as("Pong payload").isEqualTo("ping");
         frames.forEach(WebSocketFrame::release);
     }
 }

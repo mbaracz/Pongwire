@@ -331,6 +331,14 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
     @Override
     public void channelWritabilityChanged(ChannelHandlerContext context) {
+        // Before the application callback, which could fill the write buffer again and keep the Pong waiting.
+        // The field is cleared first, because the write can change the writability and call this method again.
+        if (deferredPongPayload != null && context.channel().isWritable()) {
+            ByteBuf payload = deferredPongPayload;
+            deferredPongPayload = null;
+            context.writeAndFlush(new PongWebSocketFrame(payload));
+        }
+
         WritabilityHandler<T, D> writabilityHandler = webSocketServer.getWritabilityHandler();
 
         if (openedSession != null && !closeHandled && writabilityHandler != null) {
@@ -338,11 +346,6 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             boolean writable = context.channel().isWritable();
 
             runCallback(context, () -> writabilityHandler.handleWritabilityChanged(session, writable));
-        }
-
-        if (deferredPongPayload != null && context.channel().isWritable()) {
-            context.writeAndFlush(new PongWebSocketFrame(deferredPongPayload));
-            deferredPongPayload = null;
         }
 
         if (openedSession != null && !closeHandled) {
