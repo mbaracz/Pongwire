@@ -362,6 +362,7 @@ public final class WebSocketServerConfiguration<T> {
 
         /**
          * Sets whether the connection should be closed on an exception.
+         * An open session is closed with 1007 when its message cannot be decoded and with 1011 on other server-side failures.
          *
          * @param closeOnException True to close the connection on an exception, false otherwise.
          * @return This builder.

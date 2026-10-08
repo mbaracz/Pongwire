@@ -4,7 +4,9 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -23,6 +25,7 @@ import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.InstanceOfAssertFactories.type;
 
 class ErrorHandlerTest {
 
@@ -92,6 +95,17 @@ class ErrorHandlerTest {
 
         assertThat(handlerCalls).hasValue(1);
         assertThat(observedFailures).containsExactly(failure);
+
+        if (closeOnException) {
+            // The session is closed with 1007, then the client answers the close frame
+            CloseWebSocketFrame closeFrame = assertThat(Util.readFromServer(connection.channel()))
+                .asInstanceOf(type(CloseWebSocketFrame.class))
+                .actual();
+            assertThat(closeFrame.statusCode()).isEqualTo(WebSocketCloseStatus.INVALID_PAYLOAD_DATA.code());
+            closeFrame.release();
+            Util.sendFromClient(connection.channel(), new CloseWebSocketFrame(WebSocketCloseStatus.INVALID_PAYLOAD_DATA));
+        }
+
         assertThat(connection.channel().isOpen()).isEqualTo(!closeOnException);
         assertThat(connection.server().getConnectedSessions().contains(connection.session())).isEqualTo(!closeOnException);
     }

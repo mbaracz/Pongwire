@@ -20,6 +20,7 @@ public interface CloseHandler<T, D> {
      * @param code    the status code of the close frame received from the client, 1005 if that frame had no status code,
      *                1001 if the server closed the session because it is stopping, heartbeat timed out or it was idle,
      *                the code passed to {@link WebSocketSession#close(int, String)} when the application closed it,
+     *                1007 or 1011 if the server closed it on an exception with closeOnException enabled,
      *                or 1006 if the connection was closed without a close frame (RFC 6455, section 7.1.5).
      */
     void handleClose(WebSocketSession<T, D> session, String reason, int code);

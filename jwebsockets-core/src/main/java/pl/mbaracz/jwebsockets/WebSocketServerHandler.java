@@ -10,6 +10,7 @@ import io.netty.channel.ChannelId;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.compression.DecompressionException;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.cookie.Cookie;
@@ -31,6 +32,7 @@ import pl.mbaracz.jwebsockets.handler.WritabilityHandler;
 import pl.mbaracz.jwebsockets.message.MessageDecoder;
 import pl.mbaracz.jwebsockets.message.MessageEncoder;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.URI;
@@ -359,6 +361,28 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param cause   the failure.
      */
     private void handleFailure(ChannelHandlerContext context, Throwable cause) {
+        // A broken connection or bytes Netty could not decode are caused by the client.
+        // Netty already answered protocol violations with a close frame, and a broken connection cannot carry one.
+        boolean clientFailure = cause instanceof IOException || cause instanceof DecoderException;
+        handleFailure(context, cause, clientFailure, clientFailure ? null : WebSocketCloseStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    /**
+     * Reports a connection failure and applies the configured close policy. Failures caused by the client are logged
+     * without a stack trace at debug level, so a client cannot flood the log, the others at error level.
+     *
+     * @param context       the channel handler context.
+     * @param cause         the failure.
+     * @param clientFailure whether the client caused the failure.
+     * @param closeStatus   the status of the close frame sent when closeOnException is set and the session is open,
+     *                      or null to close the connection without one.
+     */
+    private void handleFailure(
+        ChannelHandlerContext context,
+        Throwable cause,
+        boolean clientFailure,
+        WebSocketCloseStatus closeStatus
+    ) {
         notifyErrorHandler(cause);
         notifyObserver(observer -> observer.exception(openedSession, cause));
 
@@ -373,8 +397,21 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             return;
         }
 
-        LOGGER.error("Exception caught in channel with id {}", context.channel().id(), cause);
-        if (webSocketServer.getConfiguration().isCloseOnException()) {
+        if (clientFailure) {
+            LOGGER.debug("Client failure in channel with id {}: {}", context.channel().id(), cause.toString());
+        } else {
+            LOGGER.error("Exception caught in channel with id {}", context.channel().id(), cause);
+        }
+
+        if (!webSocketServer.getConfiguration().isCloseOnException()) {
+            return;
+        }
+
+        // An open session is closed with a close frame, so the client does not see an abnormal closure
+        if (closeStatus != null && openedSession != null && !closeHandled) {
+            CloseWebSocketFrame frame = new CloseWebSocketFrame(closeStatus);
+            ClosingHandshake.start(context.channel(), frame, webSocketServer.getConfiguration().getCloseTimeout());
+        } else {
             context.close();
         }
     }
@@ -544,7 +581,15 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         byte[] bytes = new byte[content.readableBytes()];
         content.getBytes(content.readerIndex(), bytes);
 
-        T message = decoder.decode(bytes);
+        T message;
+
+        // A message the application cannot decode is data inconsistent with its type (RFC 6455, section 7.4.1)
+        try {
+            message = decoder.decode(bytes);
+        } catch (RuntimeException exception) {
+            handleFailure(session.getChannelContext(), exception, true, WebSocketCloseStatus.INVALID_PAYLOAD_DATA);
+            return;
+        }
         session.updateLastMessageTime();
         resetIdleTimeout(session.getChannelContext().channel());
         notifyObserver(observer -> observer.messageReceived(session));
