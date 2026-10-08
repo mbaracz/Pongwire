@@ -5,6 +5,7 @@ import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import pl.mbaracz.jwebsockets.handler.UpgradeResult;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
@@ -22,6 +23,11 @@ class ServerObserverTest {
 
     // Records the events in the order the server reports them
     private class RecordingObserver implements WebSocketServerObserver<String, Object> {
+
+        @Override
+        public void handshakeRejected(int status) {
+            events.add("rejected " + status);
+        }
 
         @Override
         public void sessionOpened(WebSocketSession<String, Object> session) {
@@ -113,5 +119,26 @@ class ServerObserverTest {
         // Assert the message was still handled and the connection was not closed
         assertThat(messages).as("Message handler should still be called").containsExactly("hello");
         assertThat(channel.isOpen()).as("Channel should stay open").isTrue();
+    }
+
+    @Test
+    void shouldReportStatusWhenUpgradeHandlerRejectsHandshake() {
+        server.onUpgrade((_, response) -> {
+            response.setStatus(401);
+            return UpgradeResult.reject();
+        });
+
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+        Util.performHandshake(channel, "/");
+
+        assertThat(events).as("Rejection should be reported with its status").containsExactly("rejected 401");
+    }
+
+    @Test
+    void shouldReportStatusWhenHandshakeRequestIsInvalid() {
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+        Util.performHandshake(channel, "/unknown");
+
+        assertThat(events).as("Rejection should be reported with its status").containsExactly("rejected 400");
     }
 }

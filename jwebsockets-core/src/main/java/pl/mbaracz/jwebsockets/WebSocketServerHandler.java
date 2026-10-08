@@ -692,6 +692,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
         // Netty leaks its response buffer when a malformed pre-RFC 6455 (Hixie) handshake fails, so those are unsupported too
         if (handshaker == null || handshaker.version() == WebSocketVersion.V00) {
+            notifyObserver(observer -> observer.handshakeRejected(HttpResponseStatus.UPGRADE_REQUIRED.code()));
             WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(context.channel())
                 .addListener(ChannelFutureListener.CLOSE);
             return;
@@ -727,6 +728,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             }
 
             if (rejection != null) {
+                int status = upgradeResponse.getStatus();
+                notifyObserver(observer -> observer.handshakeRejected(status));
                 context.writeAndFlush(rejection).addListener(ChannelFutureListener.CLOSE);
                 return;
             }
@@ -1158,7 +1161,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param status  the response status.
      * @return the future of the write, notified after the connection is closed.
      */
-    private static ChannelFuture sendResponse(ChannelHandlerContext context, HttpResponseStatus status) {
+    private ChannelFuture sendResponse(ChannelHandlerContext context, HttpResponseStatus status) {
+        notifyObserver(observer -> observer.handshakeRejected(status.code()));
         DefaultFullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status);
         return context.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
     }

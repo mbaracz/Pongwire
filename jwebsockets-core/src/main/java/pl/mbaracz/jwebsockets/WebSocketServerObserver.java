@@ -10,6 +10,15 @@ package pl.mbaracz.jwebsockets;
 public interface WebSocketServerObserver<T, D> {
 
     /**
+     * Called when a handshake request is answered with an HTTP error status instead of opening a session,
+     * e.g. because the upgrade handler rejected it or the request is not a valid WebSocket handshake.
+     *
+     * @param status the HTTP status of the response.
+     */
+    default void handshakeRejected(int status) {
+    }
+
+    /**
      * Called when a session is opened, before the open handler.
      *
      * @param session the opened WebSocket session.

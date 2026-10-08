@@ -11,7 +11,8 @@ import pl.mbaracz.jwebsockets.WebSocketSession;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Records the sessions, messages and errors of a WebSocket server in a Micrometer registry.
+ * Records the sessions, messages, errors and rejected handshakes of a WebSocket server in a Micrometer registry.
+ * Closed sessions are tagged with their close code and rejected handshakes with their HTTP status.
  *
  * @param <T> the type of the WebSocket message.
  * @param <D> the type of additional data associated with the WebSocket session.
@@ -19,8 +20,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class WebSocketServerMetrics<T, D> implements WebSocketServerObserver<T, D> {
 
     private final AtomicInteger activeSessions = new AtomicInteger();
+    private final MeterRegistry registry;
+    private final Iterable<Tag> tags;
     private final Counter sessionsOpened;
-    private final Counter sessionsClosed;
     private final Counter messagesReceived;
     private final Counter messagesSent;
     private final Counter errors;
@@ -41,13 +43,15 @@ public class WebSocketServerMetrics<T, D> implements WebSocketServerObserver<T, 
      * @param tags     the tags added to every metric, e.g. to tell several servers apart.
      */
     public WebSocketServerMetrics(MeterRegistry registry, Iterable<Tag> tags) {
+        this.registry = registry;
+        this.tags = tags;
+
         Gauge.builder("jwebsockets.sessions.active", activeSessions, AtomicInteger::get)
             .description("The number of open sessions")
             .tags(tags)
             .register(registry);
 
         this.sessionsOpened = counter(registry, tags, "jwebsockets.sessions.opened", "The number of opened sessions");
-        this.sessionsClosed = counter(registry, tags, "jwebsockets.sessions.closed", "The number of closed sessions");
         this.messagesReceived = counter(registry, tags, "jwebsockets.messages.received", "The number of received messages");
         this.messagesSent = counter(registry, tags, "jwebsockets.messages.sent", "The number of messages successfully written to connections");
         this.errors = counter(registry, tags, "jwebsockets.errors", "The number of exceptions caught on connections");
@@ -69,7 +73,14 @@ public class WebSocketServerMetrics<T, D> implements WebSocketServerObserver<T, 
     @Override
     public void sessionClosed(WebSocketSession<T, D> session, int code, String reason) {
         activeSessions.decrementAndGet();
-        sessionsClosed.increment();
+        counter(registry, Tags.of(tags).and("code", String.valueOf(code)), "jwebsockets.sessions.closed", "The number of closed sessions")
+            .increment();
+    }
+
+    @Override
+    public void handshakeRejected(int status) {
+        counter(registry, Tags.of(tags).and("status", String.valueOf(status)), "jwebsockets.handshakes.rejected", "The number of rejected handshakes")
+            .increment();
     }
 
     @Override

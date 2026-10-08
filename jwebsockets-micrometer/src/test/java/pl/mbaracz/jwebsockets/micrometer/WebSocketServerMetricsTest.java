@@ -24,12 +24,28 @@ class WebSocketServerMetricsTest {
     void shouldCountSessionsWhenSessionsAreOpenedAndClosed() {
         metrics.sessionOpened(null);
         metrics.sessionOpened(null);
+        metrics.sessionOpened(null);
         metrics.sessionClosed(null, 1000, "bye");
+        metrics.sessionClosed(null, 1006, "Abnormal closure");
 
         assertSoftly(softly -> {
             softly.assertThat(registry.get("jwebsockets.sessions.active").gauge().value()).as("Active sessions").isEqualTo(1);
-            softly.assertThat(registry.get("jwebsockets.sessions.opened").counter().count()).as("Opened sessions").isEqualTo(2);
-            softly.assertThat(registry.get("jwebsockets.sessions.closed").counter().count()).as("Closed sessions").isEqualTo(1);
+            softly.assertThat(registry.get("jwebsockets.sessions.opened").counter().count()).as("Opened sessions").isEqualTo(3);
+            softly.assertThat(registry.get("jwebsockets.sessions.closed").tag("code", "1000").counter().count()).as("Closed normally").isEqualTo(1);
+            softly.assertThat(registry.get("jwebsockets.sessions.closed").tag("code", "1006").counter().count()).as("Closed abnormally").isEqualTo(1);
+        });
+    }
+
+    @Test
+    void shouldCountRejectedHandshakesByStatus() {
+        metrics.handshakeRejected(401);
+        metrics.handshakeRejected(401);
+        metrics.handshakeRejected(400);
+
+        assertSoftly(softly -> {
+            softly.assertThat(registry.get("jwebsockets.handshakes.rejected").tag("status", "401").counter().count()).as("Unauthorized").isEqualTo(2);
+            softly.assertThat(registry.get("jwebsockets.handshakes.rejected").tag("status", "400").counter().count()).as("Bad request").isEqualTo(1);
+            softly.assertThat(registry.get("jwebsockets.handshakes.rejected").tag("server", "chat").counters()).as("Should be tagged").hasSize(2);
         });
     }
 
