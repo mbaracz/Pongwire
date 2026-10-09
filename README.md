@@ -176,6 +176,10 @@ Exceeding a WebSocket size limit closes the connection with code `1009`. `maxFra
 
 `stop()` stops accepting new connections, sends active sessions a `1001` (Going Away) close frame, waits up to
 `closeTimeout` (5 seconds by default), then force-closes remaining connections and shuts down the event loops.
+`onClose` may still `broadcast` while the server is stopping. With a `callbackExecutor`, `onClose` callbacks can run
+after `stop()` returns, so shut the executor down gracefully (`shutdown()` and `awaitTermination()`) after `stop()`.
+If the server channel closes unexpectedly, `isRunning()` returns `false`, but `stop()` must still be called to release
+the event loops.
 
 ## Code quality
 

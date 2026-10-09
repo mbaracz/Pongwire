@@ -1,6 +1,7 @@
 package pl.mbaracz.jwebsockets;
 
 import io.netty.channel.Channel;
+import io.netty.channel.DefaultChannelId;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
@@ -19,6 +20,8 @@ import java.net.http.WebSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
@@ -326,6 +329,10 @@ class WebSocketServerTest {
             // Assert the server is no longer accepting connections
             assertThat(server.isRunning()).as("Server should not be running").isFalse();
             assertThat(server.getLocalAddress()).as("Address after channel close").isNull();
+            assertThatThrownBy(() -> server.listen(port))
+                .as("Restart should require stop() first")
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("call stop()");
 
             // stop() must still clean up event loop resources
             assertThatCode(server::stop).as("Stop should release the remaining resources").doesNotThrowAnyException();
@@ -614,5 +621,27 @@ class WebSocketServerTest {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();
         }
+    }
+
+    @Test
+    void shouldBroadcastFromCloseHandlerWhileStopping() {
+        List<Throwable> errors = new ArrayList<>();
+        server
+            .onClose((_, _, _) -> server.broadcast("bye"))
+            .onError((_, exception) -> errors.add(exception))
+            .listen(0);
+        EmbeddedChannel first = connectWithUniqueId();
+        EmbeddedChannel second = connectWithUniqueId();
+
+        assertThatCode(server::stop).as("Stop should not fail").doesNotThrowAnyException();
+        assertThat(errors).as("Broadcast from onClose should not fail").isEmpty();
+        assertThat(first.isOpen() || second.isOpen()).as("Sessions should be closed").isFalse();
+    }
+
+    private EmbeddedChannel connectWithUniqueId() {
+        EmbeddedChannel channel = Util.newEmbeddedChannel(DefaultChannelId.newInstance(), new WebSocketServerChannelInitializer<>(server));
+        Util.performHandshake(channel, "/");
+        channel.releaseOutbound();
+        return channel;
     }
 }

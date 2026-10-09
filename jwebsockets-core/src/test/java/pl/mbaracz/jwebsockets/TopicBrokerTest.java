@@ -13,6 +13,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TopicBrokerTest {
@@ -246,5 +247,25 @@ class TopicBrokerTest {
         Util.performHandshake(channel, "/");
         channel.releaseOutbound();
         return channel;
+    }
+
+    @Test
+    void shouldSubscribeBrokerAgainAfterRestartWhenUnsubscribeFailedDuringStop() {
+        server.listen(0);
+        EmbeddedChannel channel = Util.connect(server);
+        server.subscribe(server.getSessionByChannelId(channel.id()), "topic").toCompletableFuture().join();
+
+        // The broker fails to unsubscribe the closed session, e.g. because its client is shut down
+        broker.unsubscribeResult = CompletableFuture.failedFuture(new IllegalStateException("broker closed"));
+        server.stop();
+
+        assertThatCode(() -> server.topicBroker(new RecordingTopicBroker())).as("Broker should be replaceable").doesNotThrowAnyException();
+
+        server.topicBroker(broker).listen(0);
+        EmbeddedChannel restarted = Util.connect(server);
+        server.subscribe(server.getSessionByChannelId(restarted.id()), "topic").toCompletableFuture().join();
+        server.stop();
+
+        assertThat(broker.calls).as("Topic should be subscribed again").containsSubsequence("subscribe topic", "unsubscribe topic", "subscribe topic");
     }
 }

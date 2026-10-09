@@ -27,8 +27,10 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
@@ -662,8 +664,11 @@ public class WebSocketServer<T, D> {
      */
     public WebSocketServer<T, D> listen(int port) throws IllegalStateException {
         synchronized (lifecycleLock) {
+            if (state == State.RUNNING && serverChannel == null) {
+                throw new IllegalStateException("WebSocket server channel closed unexpectedly, call stop() before starting it again!");
+            }
             if (state == State.RUNNING) {
-                throw new IllegalStateException("WebSocket server is already running on port " + port + "!");
+                throw new IllegalStateException("WebSocket server is already running at " + serverChannel.localAddress() + "!");
             }
             if (state == State.STOPPING) {
                 throw new IllegalStateException("WebSocket server is still stopping, cannot start it yet!");
@@ -713,6 +718,10 @@ public class WebSocketServer<T, D> {
                 synchronized (lifecycleLock) {
                     if (serverChannel == channel) {
                         serverChannel = null;
+
+                        if (state == State.RUNNING) {
+                            LOGGER.warn("WebSocket server channel closed unexpectedly, call stop() to release the server's resources");
+                        }
                     }
                 }
             });
@@ -726,7 +735,10 @@ public class WebSocketServer<T, D> {
     /**
      * Stops the WebSocket server gracefully.
      * Closes the server channel, sends a going away close frame to every connected session and closes its connection,
-     * then shuts down the event loop groups and waits for them to terminate.
+     * then shuts down the event loop groups and waits for them to terminate and for the pending topic broker
+     * operations, each for a limited time. Also releases a server whose channel closed unexpectedly.
+     * With a callback executor, onClose callbacks may run after this method returns, so shut the executor down
+     * gracefully afterwards.
      *
      * @throws IllegalStateException If the server is not running or the method is called from one of the server's
      *                               event loop threads, where waiting for the shutdown would block forever
@@ -764,6 +776,7 @@ public class WebSocketServer<T, D> {
             // Release the event loops and leave STOPPING even if closing the connections failed
             try {
                 shutdownGracefully(boss, worker);
+                settleBrokerState();
             } finally {
                 synchronized (lifecycleLock) {
                     serverChannel = null;
@@ -775,6 +788,34 @@ public class WebSocketServer<T, D> {
         }
 
         LOGGER.info("Server stopped!");
+    }
+
+    /**
+     * Waits, within the close timeout, for the broker operations the closed sessions started, then forgets the broker
+     * state of topics without local subscribers. The next listen() subscribes such topics again, also when a broker
+     * that was shut down after stop() lost them.
+     */
+    private void settleBrokerState() {
+        CompletableFuture<?>[] pending;
+
+        synchronized (sessionTopicLock) {
+            pending = topicBrokerOperations.values().toArray(CompletableFuture[]::new);
+        }
+
+        try {
+            CompletableFuture.allOf(pending).get(configuration.getCloseTimeout().toNanos(), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException exception) {
+            LOGGER.warn("Topic broker operations did not complete within the close timeout");
+        } catch (ExecutionException exception) {
+            // Already logged by the session that started the operation
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
+
+        synchronized (sessionTopicLock) {
+            brokerSubscriptions.entrySet().removeIf(entry ->
+                entry.getValue().transition == null && !sessionTopicRegistry.hasSubscribers(entry.getKey()));
+        }
     }
 
     /**
@@ -817,8 +858,9 @@ public class WebSocketServer<T, D> {
         }
 
         for (EventLoopGroup group : groups) {
-            if (group != null) {
-                group.terminationFuture().awaitUninterruptibly();
+            // A callback blocking an event loop would otherwise keep stop() waiting forever
+            if (group != null && !group.terminationFuture().awaitUninterruptibly(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                LOGGER.warn("Event loops did not terminate within {} seconds, a callback may be blocking them", SHUTDOWN_TIMEOUT_SECONDS);
             }
         }
     }
@@ -836,11 +878,13 @@ public class WebSocketServer<T, D> {
 
     /**
      * Broadcasts a message to all connected WebSocket sessions.
+     * While the server is stopping, e.g. from onClose, it is sent to the sessions that are still open.
      *
      * @param message The message to be broadcast
+     * @throws IllegalStateException If the server is stopped
      */
     public synchronized void broadcast(T message) {
-        if (!isRunning()) {
+        if (state == State.STOPPED) {
             throw new IllegalStateException("Server is not running, cannot broadcast!");
         }
         sessionRegistry.snapshot().forEach(session -> session.sendMessage(message));
@@ -860,6 +904,7 @@ public class WebSocketServer<T, D> {
     /**
      * Checks if the WebSocket server is currently running.
      * Returns false once the server channel has closed, even if stop() was not called yet.
+     * Call stop() in that case too, to release the event loops and close the remaining sessions.
      *
      * @return True if the server is running, false otherwise
      */
