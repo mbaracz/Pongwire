@@ -16,6 +16,7 @@ final class OutboundCloseInfoHandler extends ChannelOutboundHandlerAdapter {
         if (message instanceof CloseWebSocketFrame frame) {
             int code = frame.statusCode() == -1 ? WebSocketCloseStatus.EMPTY.code() : frame.statusCode();
             context.channel().attr(CloseInfo.KEY).setIfAbsent(new CloseInfo(code, frame.reasonText()));
+            ClosingHandshake.markServerStarted(context.channel());
         }
 
         context.write(message, promise);

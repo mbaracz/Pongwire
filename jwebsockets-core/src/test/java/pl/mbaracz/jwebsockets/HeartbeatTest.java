@@ -141,6 +141,29 @@ class HeartbeatTest {
     }
 
     @Test
+    void shouldNotPingOrCloseAgainWhileClosingHandshakeRuns() {
+        server.configure(configurer -> configurer.setCloseTimeout(Duration.ofSeconds(60)));
+        EmbeddedChannel channel = connect();
+        advanceTime(channel, 30);
+        assertPingSent(channel);
+
+        // The session is closed while the ping is still unanswered
+        server.getSessionByChannelId(channel.id()).close(1000, "bye");
+        Util.readFromServer(channel).release();
+
+        advanceTime(channel, 10);
+        advanceTime(channel, 30);
+
+        assertThat(Util.readFromServer(channel)).as("Should send neither a ping nor a second close frame").isNull();
+        assertThat(channel.isOpen()).as("Should wait for the closing handshake").isTrue();
+
+        advanceTime(channel, 20);
+
+        assertThat(channel.isOpen()).as("Should close after the close timeout").isFalse();
+        assertThat(closes).as("Should report the status of the first close frame").isEqualTo(List.of(new Close(1000, "bye")));
+    }
+
+    @Test
     void shouldStillTimeOutSessionWhenDataArrivesButPongDoesNot() {
         EmbeddedChannel channel = connect();
 

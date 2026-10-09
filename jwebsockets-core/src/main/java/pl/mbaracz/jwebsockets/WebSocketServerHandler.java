@@ -894,8 +894,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      */
     private void sendHeartbeatPing(Channel channel, Duration timeout) {
         // Behind a full write buffer the Pong could not come back in time, and the ping would only add to the buffer.
-        // While the server stopped reading for its pending callbacks, the Pong would not be read either.
-        if (!channel.isWritable() || !channel.config().isAutoRead()) {
+        // While the server stopped reading for its pending callbacks, the Pong would not be read either,
+        // and after a close frame was sent the closing handshake has its own timeout.
+        if (!channel.isWritable() || !channel.config().isAutoRead() || ClosingHandshake.isClosing(channel)) {
             return;
         }
 
@@ -971,6 +972,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param channel the channel of the WebSocket connection.
      */
     private static void closeOnHeartbeatTimeout(Channel channel) {
+        // A closed connection keeps the status it was closed with, and a closing one waits for its closing handshake
+        if (!channel.isActive() || ClosingHandshake.isClosing(channel)) {
+            return;
+        }
+
         CloseInfo closeInfo = new CloseInfo(WebSocketCloseStatus.ENDPOINT_UNAVAILABLE.code(), "Heartbeat timeout");
 
         // The client may not read anymore, so close without waiting for the close frame to be written
@@ -1023,6 +1029,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param channel the channel of the session.
      */
     private void closeOnIdleTimeout(Channel channel) {
+        // The task may run after the socket closed, before channelInactive() cancelled it
+        if (!channel.isActive()) {
+            return;
+        }
+
         // The client's messages wait unread while the server stopped reading for its pending callbacks
         if (!channel.config().isAutoRead()) {
             resetIdleTimeout(channel);
@@ -1075,6 +1086,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param channel the channel of the WebSocket connection.
      */
     private static void closeUnwritable(Channel channel) {
+        // The task may run after the socket closed, before channelInactive() cancelled it
+        if (!channel.isActive()) {
+            return;
+        }
+
         CloseInfo closeInfo = new CloseInfo(WebSocketCloseStatus.ABNORMAL_CLOSURE.code(), "Unwritable timeout");
 
         channel.attr(CloseInfo.KEY).setIfAbsent(closeInfo);

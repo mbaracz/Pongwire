@@ -74,6 +74,16 @@ final class ClosingHandshake {
         channel.closeFuture().addListener(_ -> closeTimeout.cancel(false));
     }
 
+    /**
+     * Marks the connection as closing once any close frame is written, also one written by Netty's validators,
+     * so no message is sent after it.
+     *
+     * @param channel the channel of the WebSocket connection.
+     */
+    static void markServerStarted(Channel channel) {
+        channel.attr(STATE).setIfAbsent(State.SERVER_STARTED);
+    }
+
     static boolean markClientStarted(Channel channel) {
         return channel.attr(STATE).setIfAbsent(State.CLIENT_STARTED) == null;
     }

@@ -253,4 +253,23 @@ class SessionCloseTest {
         assertThatThrownBy(() -> opened.getFirst().close(1005, "invalid")).isInstanceOf(IllegalArgumentException.class);
         assertThat(channel.isOpen()).as("Channel should stay open").isTrue();
     }
+
+    @Test
+    void shouldRejectMessagesAfterNettyWroteCloseFrame() {
+        EmbeddedChannel channel = Util.connect(server);
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+            }
+        });
+
+        // Netty's decoder and validators write the close frame for a protocol violation themselves
+        channel.writeAndFlush(new CloseWebSocketFrame(WebSocketCloseStatus.PROTOCOL_ERROR));
+        CompletableFuture<Void> send = opened.getFirst().sendMessageAsync("late").toCompletableFuture();
+
+        assertThatThrownBy(() -> send.get(1, TimeUnit.SECONDS))
+            .as("No message should follow the close frame")
+            .cause()
+            .isInstanceOf(IllegalStateException.class);
+    }
 }
