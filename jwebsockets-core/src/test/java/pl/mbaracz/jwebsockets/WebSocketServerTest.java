@@ -1,6 +1,9 @@
 package pl.mbaracz.jwebsockets;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.DefaultChannelId;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -17,6 +20,7 @@ import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -27,6 +31,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Stream;
 
@@ -636,6 +641,44 @@ class WebSocketServerTest {
         assertThatCode(server::stop).as("Stop should not fail").doesNotThrowAnyException();
         assertThat(errors).as("Broadcast from onClose should not fail").isEmpty();
         assertThat(first.isOpen() || second.isOpen()).as("Sessions should be closed").isFalse();
+    }
+
+    @Test
+    void shouldNotOpenSessionsWhileStopping() {
+        List<WebSocketSession<String, Object>> opened = new ArrayList<>();
+        AtomicReference<Runnable> whileStopping = new AtomicReference<>(() -> {});
+        server
+            .onOpen(opened::add)
+            .onClose((_, _, _) -> whileStopping.getAndSet(() -> {}).run())
+            .listen(0);
+        connectWithUniqueId();
+
+        // A handshake whose 101 response is still being written when stop() starts
+        EmbeddedChannel late = Util.newEmbeddedChannel(DefaultChannelId.newInstance(), new WebSocketServerChannelInitializer<>(server));
+        List<Object> lateOutbound = new ArrayList<>();
+        late.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+                if (whileStopping.get() == null) {
+                    context.flush();
+                }
+            }
+        });
+        Util.performHandshake(late, "/");
+        EmbeddedChannel rejected = Util.newEmbeddedChannel(DefaultChannelId.newInstance(), new WebSocketServerChannelInitializer<>(server));
+
+        whileStopping.set(() -> {
+            whileStopping.set(null);
+            late.flush();
+            Util.performHandshake(rejected, "/");
+        });
+        server.stop();
+
+        assertThat(opened).as("Only the session opened before stop() should be opened").hasSize(1);
+        assertThat(late.isOpen()).as("Late session should be closed").isFalse();
+        ByteBuf response = rejected.readOutbound();
+        assertThat(response.toString(StandardCharsets.US_ASCII)).as("New handshake should be rejected").startsWith("HTTP/1.1 503");
+        response.release();
     }
 
     private EmbeddedChannel connectWithUniqueId() {

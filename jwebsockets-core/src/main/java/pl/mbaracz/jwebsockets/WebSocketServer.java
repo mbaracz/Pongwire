@@ -977,6 +977,10 @@ public class WebSocketServer<T, D> {
         sessionRegistry.register(session);
     }
 
+    boolean isStopping() {
+        return state == State.STOPPING;
+    }
+
     String getPath() {
         return path;
     }
