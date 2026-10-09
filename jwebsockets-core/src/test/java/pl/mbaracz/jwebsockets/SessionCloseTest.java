@@ -272,4 +272,27 @@ class SessionCloseTest {
             .cause()
             .isInstanceOf(IllegalStateException.class);
     }
+
+    @Test
+    void shouldCompleteCloseStageAfterSessionClosureWasHandled() {
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = opened.getFirst();
+        List<String> stateOnCompletion = new ArrayList<>();
+
+        session.close(1000, "done").thenRun(() -> stateOnCompletion.add(
+            "registered=" + server.getConnectedSessions().contains(session) + " closes=" + closes.size()
+        ));
+        Util.readFromServer(channel).release();
+        Util.sendFromClient(channel, new CloseWebSocketFrame(WebSocketCloseStatus.NORMAL_CLOSURE, "bye"));
+
+        assertThat(stateOnCompletion).as("Stage should complete after removal and onClose").containsExactly("registered=false closes=1");
+    }
+
+    @Test
+    void shouldCompleteCloseStageWhenSessionIsAlreadyClosed() {
+        EmbeddedChannel channel = Util.connect(server);
+        channel.close();
+
+        assertThat(opened.getFirst().close(1000, "late").toCompletableFuture()).as("Stage should be completed").isDone();
+    }
 }

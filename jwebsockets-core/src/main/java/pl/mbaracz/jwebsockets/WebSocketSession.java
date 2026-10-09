@@ -24,6 +24,7 @@ public class WebSocketSession<T, D> {
     private final D context;
     private final Duration closeTimeout;
     private final Instant connectedSince;
+    private final CompletableFuture<Void> closed = new CompletableFuture<>();
     private volatile Instant lastMessageTime;
     private volatile String subprotocol;
 
@@ -125,6 +126,7 @@ public class WebSocketSession<T, D> {
      * @param message The message to be sent.
      * @return A stage that completes when the message is written, or exceptionally
      * when encoding, writing, or backpressure rejection fails the send.
+     * It usually completes on the event loop, so use the async methods of the stage for blocking continuations.
      */
     public CompletionStage<Void> sendMessageAsync(T message) {
         CompletableFuture<Void> result = new CompletableFuture<>();
@@ -151,16 +153,23 @@ public class WebSocketSession<T, D> {
      *
      * @param code   The status code of the close frame.
      * @param reason The reason of the close frame.
-     * @return A stage that completes when the connection is closed.
+     * @return A stage that completes once the session was removed from the server and the close handler was called,
+     * or queued on the callback executor. It usually completes on the event loop, so use the async methods of the
+     * stage for blocking continuations.
      * @throws IllegalArgumentException If the code is not a valid close status code.
      */
     public CompletionStage<Void> close(int code, String reason) {
         CloseWebSocketFrame closeFrame = new CloseWebSocketFrame(code, reason);
-        CompletableFuture<Void> result = new CompletableFuture<>();
+        ClosingHandshake.start(channelContext.channel(), closeFrame, closeTimeout);
 
-        whenDone(ClosingHandshake.start(channelContext.channel(), closeFrame, closeTimeout), _ -> result.complete(null));
+        return closed.copy();
+    }
 
-        return result;
+    /**
+     * Completes the stages returned by {@link #close(int, String)}, once the server handled the closure of the session.
+     */
+    void markClosed() {
+        closed.complete(null);
     }
 
     /**

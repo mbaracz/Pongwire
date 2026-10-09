@@ -602,6 +602,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         if (closeHandler != null) {
             runCallback(context, () -> closeHandler.handleClose(session, closeInfo.reason(), closeInfo.code()));
         }
+
+        session.markClosed();
     }
 
     /**
