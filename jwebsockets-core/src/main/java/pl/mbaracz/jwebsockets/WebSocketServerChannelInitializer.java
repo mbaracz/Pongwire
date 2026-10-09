@@ -23,6 +23,14 @@ import pl.mbaracz.jwebsockets.configuration.WebSocketServerConfiguration;
 
 import javax.net.ssl.SSLException;
 
+import java.io.File;
+import java.security.GeneralSecurityException;
+import java.security.PrivateKey;
+import java.security.SecureRandom;
+import java.security.Signature;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+
 /**
  * Channel initializer for setting up the pipeline for WebSocket server channels.
  *
@@ -109,14 +117,85 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
             return null;
         }
 
+        File certificateChain = configuration.certificateChain().toFile();
+        File privateKey = configuration.privateKey().toFile();
+
         try {
-            return SslContextBuilder.forServer(
-                configuration.certificateChain().toFile(),
-                configuration.privateKey().toFile(),
-                configuration.privateKeyPassword()
-            ).build();
-        } catch (SSLException exception) {
-            throw new IllegalArgumentException("Could not create the server TLS context", exception);
+            checkKeyMatchesCertificate(certificateChain, privateKey, configuration.privateKeyPassword());
+            return SslContextBuilder.forServer(certificateChain, privateKey, configuration.privateKeyPassword()).build();
+        } catch (SSLException | RuntimeException exception) {
+            throw new IllegalArgumentException(
+                "Could not create the server TLS context from " + certificateChain + " and " + privateKey + ": " + exception.getMessage(),
+                exception
+            );
+        }
+    }
+
+    /**
+     * Checks that the private key belongs to the first certificate of the chain by signing with the key and verifying
+     * with the certificate. Netty accepts a mismatched pair, and every TLS handshake would fail later.
+     *
+     * @param certificateChain the certificate chain in PEM format.
+     * @param privateKey       the private key in PEM format.
+     * @param password         the password of the private key, or null.
+     */
+    private static void checkKeyMatchesCertificate(File certificateChain, File privateKey, String password) {
+        X509Certificate certificate;
+        PrivateKey key;
+
+        try {
+            certificate = PemFiles.certificates(certificateChain)[0];
+            key = PemFiles.privateKey(privateKey, password);
+        } catch (Exception exception) {
+            throw new IllegalArgumentException("The certificate chain or private key cannot be read", exception);
+        }
+
+        String algorithm = switch (certificate.getPublicKey().getAlgorithm()) {
+            case "RSA" -> "SHA256withRSA";
+            case "EC" -> "SHA256withECDSA";
+            case "Ed25519", "EdDSA" -> "Ed25519";
+            default -> null;
+        };
+
+        // shortcut: other key types are not checked, add their signature algorithm when a user needs one
+        if (algorithm == null) {
+            return;
+        }
+
+        try {
+            byte[] nonce = new byte[32];
+            new SecureRandom().nextBytes(nonce);
+
+            Signature signer = Signature.getInstance(algorithm);
+            signer.initSign(key);
+            signer.update(nonce);
+            byte[] signature = signer.sign();
+
+            Signature verifier = Signature.getInstance(algorithm);
+            verifier.initVerify(certificate);
+            verifier.update(nonce);
+
+            if (verifier.verify(signature)) {
+                return;
+            }
+        } catch (GeneralSecurityException exception) {
+            throw new IllegalArgumentException("The private key does not match the certificate", exception);
+        }
+
+        throw new IllegalArgumentException("The private key does not match the certificate");
+    }
+
+    /**
+     * Reads PEM files with the parsers Netty uses, which are only available to subclasses of SslContext.
+     */
+    private abstract static class PemFiles extends SslContext {
+
+        static X509Certificate[] certificates(File file) throws CertificateException {
+            return toX509Certificates(file);
+        }
+
+        static PrivateKey privateKey(File file, String password) throws Exception {
+            return toPrivateKey(file, password);
         }
     }
 

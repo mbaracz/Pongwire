@@ -320,6 +320,9 @@ public final class WebSocketServerConfiguration<T> {
      */
     public static final class Builder<T> {
 
+        // The event loops schedule timeouts in nanoseconds, a longer duration would overflow
+        private static final Duration MAX_DURATION = Duration.ofNanos(Long.MAX_VALUE);
+
         private boolean allowTextFrames = true;
         private boolean respondWithBinaryFrame;
         private boolean allowBinaryFrames;
@@ -430,6 +433,7 @@ public final class WebSocketServerConfiguration<T> {
             if (handshakeTimeout == null || !handshakeTimeout.isPositive()) {
                 throw new IllegalArgumentException("Handshake timeout must be positive!");
             }
+            requireSchedulable(handshakeTimeout, "Handshake timeout");
             this.handshakeTimeout = handshakeTimeout;
             return this;
         }
@@ -445,6 +449,7 @@ public final class WebSocketServerConfiguration<T> {
             if (heartbeatInterval != null && !heartbeatInterval.isPositive()) {
                 throw new IllegalArgumentException("Heartbeat interval must be positive!");
             }
+            requireSchedulable(heartbeatInterval, "Heartbeat interval");
             this.heartbeatInterval = heartbeatInterval;
             return this;
         }
@@ -459,6 +464,7 @@ public final class WebSocketServerConfiguration<T> {
             if (heartbeatTimeout == null || !heartbeatTimeout.isPositive()) {
                 throw new IllegalArgumentException("Heartbeat timeout must be positive!");
             }
+            requireSchedulable(heartbeatTimeout, "Heartbeat timeout");
             this.heartbeatTimeout = heartbeatTimeout;
             return this;
         }
@@ -474,6 +480,7 @@ public final class WebSocketServerConfiguration<T> {
             if (idleTimeout != null && !idleTimeout.isPositive()) {
                 throw new IllegalArgumentException("Idle timeout must be positive!");
             }
+            requireSchedulable(idleTimeout, "Idle timeout");
             this.idleTimeout = idleTimeout;
             return this;
         }
@@ -488,6 +495,7 @@ public final class WebSocketServerConfiguration<T> {
             if (closeTimeout == null || !closeTimeout.isPositive()) {
                 throw new IllegalArgumentException("Close timeout must be positive!");
             }
+            requireSchedulable(closeTimeout, "Close timeout");
             this.closeTimeout = closeTimeout;
             return this;
         }
@@ -566,6 +574,7 @@ public final class WebSocketServerConfiguration<T> {
             if (unwritableTimeout != null && !unwritableTimeout.isPositive()) {
                 throw new IllegalArgumentException("Unwritable timeout must be positive!");
             }
+            requireSchedulable(unwritableTimeout, "Unwritable timeout");
             this.unwritableTimeout = unwritableTimeout;
             return this;
         }
@@ -687,6 +696,12 @@ public final class WebSocketServerConfiguration<T> {
          * @return The new WebSocketServerConfiguration instance.
          * @throws IllegalArgumentException if the maximum frame size exceeds the maximum message size.
          */
+        private static void requireSchedulable(Duration duration, String name) {
+            if (duration != null && duration.compareTo(MAX_DURATION) > 0) {
+                throw new IllegalArgumentException(name + " must not exceed 292 years!");
+            }
+        }
+
         public WebSocketServerConfiguration<T> build() {
             if (maxFrameSize > maxMessageSize) {
                 throw new IllegalArgumentException("Maximum frame size must not exceed maximum message size!");

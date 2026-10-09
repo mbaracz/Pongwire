@@ -10,6 +10,7 @@ import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executor;
@@ -272,6 +273,13 @@ class ServerReconfigurationTest {
                 .isInstanceOf(IllegalArgumentException.class);
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setHandshakeTimeout(Duration.ZERO)))
                 .isInstanceOf(IllegalArgumentException.class);
+            // A duration the event loops cannot schedule in nanoseconds, used to mean "never"
+            softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setCloseTimeout(Duration.ofSeconds(Long.MAX_VALUE))))
+                .isInstanceOf(IllegalArgumentException.class);
+            softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setIdleTimeout(ChronoUnit.FOREVER.getDuration())))
+                .isInstanceOf(IllegalArgumentException.class);
+            softly.assertThatCode(() -> server.configure(configurer -> configurer.setHeartbeatTimeout(Duration.ofNanos(Long.MAX_VALUE))))
+                .doesNotThrowAnyException();
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setHeartbeatTimeout(null)))
                 .isInstanceOf(IllegalArgumentException.class);
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setIdleTimeout(Duration.ZERO)))

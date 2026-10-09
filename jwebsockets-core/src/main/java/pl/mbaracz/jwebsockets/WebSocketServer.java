@@ -660,7 +660,9 @@ public class WebSocketServer<T, D> {
      * @return The WebSocket server instance for method chaining
      * @throws IllegalStateException    If the server is already running or still stopping, message encoder/decoder
      *                                  was not provided or the server could not be bound to the port
-     * @throws IllegalArgumentException If the port is outside the valid range
+     * @throws IllegalArgumentException If the port is outside the valid range, or the TLS certificate chain or private key
+     *                                  cannot be read or do not match. Each call reads the files again, so a restart
+     *                                  uses rotated certificates.
      */
     public WebSocketServer<T, D> listen(int port) throws IllegalStateException {
         synchronized (lifecycleLock) {
@@ -680,6 +682,8 @@ public class WebSocketServer<T, D> {
                 throw new IllegalStateException("Message encoder is not provided, cannot start the server!");
             }
 
+            // Reads the TLS files before any event loop is created, so invalid files fail fast
+            WebSocketServerChannelInitializer<T, D> initializer = new WebSocketServerChannelInitializer<>(this);
             EventLoopGroup boss = null;
             EventLoopGroup worker = null;
             boolean started = false;
@@ -691,7 +695,7 @@ public class WebSocketServer<T, D> {
                 ChannelFuture bindFuture = new ServerBootstrap()
                     .group(boss, worker)
                     .channel(NioServerSocketChannel.class)
-                    .childHandler(new WebSocketServerChannelInitializer<>(this))
+                    .childHandler(initializer)
                     .bind(port)
                     .awaitUninterruptibly();
 
@@ -833,11 +837,12 @@ public class WebSocketServer<T, D> {
             closeFutures.add(ClosingHandshake.start(channel, closeFrame, closeTimeout));
         }
 
-        long deadline = System.nanoTime() + closeTimeout.toNanos();
+        // Elapsed time is compared instead of a deadline, which could overflow for a very long close timeout
+        long start = System.nanoTime();
 
         for (ChannelFuture closeFuture : closeFutures) {
             Channel channel = closeFuture.channel();
-            long remaining = Math.max(0, deadline - System.nanoTime());
+            long remaining = Math.max(0, closeTimeout.toNanos() - (System.nanoTime() - start));
 
             // The answer of a client served by the calling thread could only be read after stop() returns
             if (channel.eventLoop().inEventLoop() || !closeFuture.awaitUninterruptibly(remaining, TimeUnit.NANOSECONDS)) {
