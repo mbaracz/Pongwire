@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -202,5 +203,38 @@ class SessionWritabilityTest {
 
         assertThat(channel.isOpen()).as("Channel should be closed").isFalse();
         assertThat(closes).as("Close handler should be called once").isEqualTo(List.of(new Close(1006, "Unwritable timeout")));
+    }
+
+    @Test
+    void shouldRestartUnwritableTimeoutWhenWriteBufferDrains() {
+        server.configure(configurer -> configurer
+            .setWriteBufferWaterMark(1024, 2048)
+            .setUnwritableTimeout(Duration.ofSeconds(10))
+        );
+        EmbeddedChannel channel = Util.connect(server);
+        channel.freezeTime();
+
+        AtomicBoolean holding = new AtomicBoolean(true);
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+                if (!holding.get()) {
+                    context.flush();
+                }
+            }
+        });
+        channel.writeAndFlush(new TextWebSocketFrame("x".repeat(4096)));
+
+        // The buffered message reaches the client, while the connection stays unwritable for another reason
+        channel.unsafe().outboundBuffer().setUserDefinedWritability(1, false);
+        holding.set(false);
+        channel.flush();
+        channel.releaseOutbound();
+
+        advanceTime(channel, 10);
+        assertThat(channel.isOpen()).as("Drained buffer should start a new timeout").isTrue();
+
+        advanceTime(channel, 10);
+        assertThat(channel.isOpen()).as("Buffer without progress should close the connection").isFalse();
     }
 }

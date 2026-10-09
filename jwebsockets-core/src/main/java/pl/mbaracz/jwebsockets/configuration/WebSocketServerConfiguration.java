@@ -565,7 +565,8 @@ public final class WebSocketServerConfiguration<T> {
         }
 
         /**
-         * Sets how long a connection may stay unwritable, for example because the client stopped reading, before it is closed.
+         * Sets how long the write buffer of an unwritable connection may not drain, for example because the client stopped
+         * reading, before the connection is closed. A client that reads a large message slowly keeps its connection.
          *
          * @param unwritableTimeout Unwritable timeout, positive, or null to keep unwritable connections open (default).
          * @return This builder.

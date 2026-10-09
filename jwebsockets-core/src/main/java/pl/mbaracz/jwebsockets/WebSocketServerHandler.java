@@ -7,6 +7,7 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelId;
+import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.SimpleChannelInboundHandler;
@@ -101,8 +102,10 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     // Pending close when no application message is received for the configured time
     private ScheduledFuture<?> idleTimeout;
 
-    // Pending close of a connection that stays unwritable, cancelled when it becomes writable again
+    // Pending close of a connection whose write buffer does not drain, cancelled when it becomes writable again,
+    // and the pending bytes when it was scheduled, so a slowly draining buffer starts a new timeout
     private ScheduledFuture<?> unwritableTimeout;
+    private long unwritablePendingBytes;
 
     /**
      * Constructs a WebSocketServerHandler with the provided WebSocket server.
@@ -984,7 +987,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         // The client may not read anymore, so close without waiting for the close frame to be written
         channel.attr(CloseInfo.KEY).setIfAbsent(closeInfo);
         channel.writeAndFlush(new CloseWebSocketFrame(closeInfo.code(), closeInfo.reason()));
-        channel.close();
+        forceClose(channel);
     }
 
     /**
@@ -1066,9 +1069,41 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         if (channel.isWritable()) {
             cancelUnwritableTimeout();
         } else if (unwritableTimeout == null) {
-            unwritableTimeout = channel.eventLoop()
-                .schedule(() -> closeUnwritable(channel), timeout.toNanos(), TimeUnit.NANOSECONDS);
+            scheduleUnwritableTimeout(channel, timeout);
         }
+    }
+
+    /**
+     * Closes the connection if its write buffer does not drain within the timeout.
+     * A buffer that shrank meanwhile, e.g. while a slow client reads a large message, starts a new timeout instead.
+     *
+     * @param channel the channel of the WebSocket connection.
+     * @param timeout the time the buffer may not drain.
+     */
+    private void scheduleUnwritableTimeout(Channel channel, Duration timeout) {
+        unwritablePendingBytes = pendingWriteBytes(channel);
+        unwritableTimeout = channel.eventLoop().schedule(() -> {
+            if (pendingWriteBytes(channel) < unwritablePendingBytes) {
+                scheduleUnwritableTimeout(channel, timeout);
+            } else {
+                closeUnwritable(channel);
+            }
+        }, timeout.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    private static long pendingWriteBytes(Channel channel) {
+        ChannelOutboundBuffer buffer = channel.unsafe().outboundBuffer();
+        return buffer == null ? 0 : buffer.totalPendingWriteBytes();
+    }
+
+    /**
+     * Closes the transport right away. Closing through the pipeline would let the TLS handler wait up to three
+     * seconds for its close_notify, which cannot leave a full write buffer of a client that does not read.
+     *
+     * @param channel the channel of the WebSocket connection.
+     */
+    private static void forceClose(Channel channel) {
+        channel.unsafe().close(channel.voidPromise());
     }
 
     /**
@@ -1096,7 +1131,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         CloseInfo closeInfo = new CloseInfo(WebSocketCloseStatus.ABNORMAL_CLOSURE.code(), "Unwritable timeout");
 
         channel.attr(CloseInfo.KEY).setIfAbsent(closeInfo);
-        channel.close();
+        forceClose(channel);
     }
 
     /**
