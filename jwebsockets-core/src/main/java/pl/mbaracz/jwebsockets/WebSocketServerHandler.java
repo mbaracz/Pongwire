@@ -48,6 +48,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -83,6 +84,10 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     // so a close frame and the following channelInactive() report it only once
     private WebSocketSession<T, D> openedSession;
     private boolean closeHandled;
+
+    // Whether a writability callback waits to run, and the writability it reported last, accessed only by the callbacks
+    private final AtomicBoolean writabilityCallbackPending = new AtomicBoolean();
+    private boolean reportedWritable = true;
 
     // Payload of the most recent Ping received while the channel was unwritable, answered once it is writable again
     private ByteBuf deferredPongPayload;
@@ -341,11 +346,21 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
         WritabilityHandler<T, D> writabilityHandler = webSocketServer.getWritabilityHandler();
 
-        if (openedSession != null && !closeHandled && writabilityHandler != null) {
+        // One pending callback reports the writability at the time it runs,
+        // so changes while the callback executor is busy do not queue up.
+        // A value already reported is not reported again.
+        if (openedSession != null && !closeHandled && writabilityHandler != null && writabilityCallbackPending.compareAndSet(false, true)) {
             WebSocketSession<T, D> session = openedSession;
-            boolean writable = context.channel().isWritable();
 
-            runCallback(context, () -> writabilityHandler.handleWritabilityChanged(session, writable));
+            runCallback(context, () -> {
+                writabilityCallbackPending.set(false);
+                boolean writable = context.channel().isWritable();
+
+                if (writable != reportedWritable) {
+                    reportedWritable = writable;
+                    writabilityHandler.handleWritabilityChanged(session, writable);
+                }
+            });
         }
 
         if (openedSession != null && !closeHandled) {

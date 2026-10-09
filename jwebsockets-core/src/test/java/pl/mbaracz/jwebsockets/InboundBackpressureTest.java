@@ -219,4 +219,25 @@ class InboundBackpressureTest {
         channel.advanceTimeBy(seconds, TimeUnit.SECONDS);
         channel.runScheduledPendingTasks();
     }
+
+    @Test
+    void shouldReportOnlyLatestWritabilityWhenItChangesWhileCallbacksWait() {
+        List<Boolean> notifications = new ArrayList<>();
+        server.onWritabilityChanged((_, writable) -> notifications.add(writable));
+        EmbeddedChannel channel = Util.connect(server);
+
+        // The writability flips many times while the callback executor is busy
+        for (int i = 0; i < 10; i++) {
+            channel.unsafe().outboundBuffer().setUserDefinedWritability(1, false);
+            channel.unsafe().outboundBuffer().setUserDefinedWritability(1, true);
+        }
+        channel.unsafe().outboundBuffer().setUserDefinedWritability(1, false);
+        channel.runPendingTasks();
+
+        while (!callbacks.isEmpty()) {
+            runCallbacks(channel, 1);
+        }
+
+        assertThat(notifications).as("Should report the latest writability once").containsExactly(false);
+    }
 }
