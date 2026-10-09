@@ -3,18 +3,23 @@ package pl.mbaracz.jwebsockets;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -152,5 +157,66 @@ class InboundBackpressureTest {
             }
         });
         return reads;
+    }
+
+    @Test
+    void shouldNotPingWhileReadingIsPaused() {
+        server.configure(configurer -> configurer.setHeartbeatInterval(Duration.ofSeconds(30)));
+        EmbeddedChannel channel = Util.connect(server);
+        channel.freezeTime();
+        send(channel, 4);
+
+        advanceTime(channel, 30);
+        advanceTime(channel, 30);
+
+        assertThat(Util.readFromServer(channel)).as("Should not ping a client it does not read from").isNull();
+        assertThat(channel.isOpen()).as("Connection should stay open").isTrue();
+    }
+
+    @Test
+    void shouldWaitForPongWhenReadingWasPausedAfterPing() {
+        server.configure(configurer -> configurer
+            .setHeartbeatInterval(Duration.ofSeconds(30))
+            .setHeartbeatTimeout(Duration.ofSeconds(10))
+        );
+        EmbeddedChannel channel = Util.connect(server);
+        channel.freezeTime();
+        advanceTime(channel, 30);
+        Util.readFromServer(channel).release();
+
+        // The client answers, but the server stopped reading before the Pong
+        send(channel, 4);
+        advanceTime(channel, 10);
+        assertThat(channel.isOpen()).as("Heartbeat should not time out while reading is paused").isTrue();
+
+        runCallbacks(channel, 2);
+        Util.sendFromClient(channel, new PongWebSocketFrame());
+        advanceTime(channel, 10);
+
+        assertThat(channel.isOpen()).as("Pong read after resuming should answer the ping").isTrue();
+    }
+
+    @Test
+    void shouldNotCloseIdleSessionWhileReadingIsPaused() {
+        server.configure(configurer -> configurer.setIdleTimeout(Duration.ofSeconds(60)));
+        EmbeddedChannel channel = Util.connect(server);
+        channel.freezeTime();
+        send(channel, 4);
+
+        advanceTime(channel, 60);
+        assertThat(Util.readFromServer(channel)).as("Should not close while reading is paused").isNull();
+
+        runCallbacks(channel, 4);
+        advanceTime(channel, 60);
+
+        assertThat(Util.readFromServer(channel))
+            .as("Should close once the client stays idle after resuming")
+            .isInstanceOf(CloseWebSocketFrame.class)
+            .satisfies(ReferenceCountUtil::release);
+    }
+
+    private static void advanceTime(EmbeddedChannel channel, long seconds) {
+        channel.advanceTimeBy(seconds, TimeUnit.SECONDS);
+        channel.runScheduledPendingTasks();
     }
 }

@@ -867,8 +867,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param timeout the time to wait for the pong.
      */
     private void sendHeartbeatPing(Channel channel, Duration timeout) {
-        // Behind a full write buffer the Pong could not come back in time, and the ping would only add to the buffer
-        if (!channel.isWritable()) {
+        // Behind a full write buffer the Pong could not come back in time, and the ping would only add to the buffer.
+        // While the server stopped reading for its pending callbacks, the Pong would not be read either.
+        if (!channel.isWritable() || !channel.config().isAutoRead()) {
             return;
         }
 
@@ -877,9 +878,25 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
         // Keep the deadline of an earlier ping that was not answered yet
         if (heartbeatTimeout == null) {
-            heartbeatTimeout = channel.eventLoop()
-                .schedule(() -> closeOnHeartbeatTimeout(channel), timeout.toNanos(), TimeUnit.NANOSECONDS);
+            scheduleHeartbeatTimeout(channel, timeout);
         }
+    }
+
+    /**
+     * Closes the connection if the Pong does not arrive within the timeout. While the server stopped reading for its
+     * pending callbacks, the Pong cannot arrive, so the deadline starts again instead.
+     *
+     * @param channel the channel of the WebSocket connection.
+     * @param timeout the time to wait for the Pong.
+     */
+    private void scheduleHeartbeatTimeout(Channel channel, Duration timeout) {
+        heartbeatTimeout = channel.eventLoop().schedule(() -> {
+            if (channel.config().isAutoRead()) {
+                closeOnHeartbeatTimeout(channel);
+            } else {
+                scheduleHeartbeatTimeout(channel, timeout);
+            }
+        }, timeout.toNanos(), TimeUnit.NANOSECONDS);
     }
 
     /**
@@ -980,6 +997,12 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param channel the channel of the session.
      */
     private void closeOnIdleTimeout(Channel channel) {
+        // The client's messages wait unread while the server stopped reading for its pending callbacks
+        if (!channel.config().isAutoRead()) {
+            resetIdleTimeout(channel);
+            return;
+        }
+
         Duration closeTimeout = webSocketServer.getConfiguration().getCloseTimeout();
         ClosingHandshake.start(
             channel,
