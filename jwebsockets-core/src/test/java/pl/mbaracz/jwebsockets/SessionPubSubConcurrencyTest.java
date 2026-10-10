@@ -7,6 +7,7 @@ import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -110,7 +111,11 @@ class SessionPubSubConcurrencyTest {
         disconnect.join();
 
         if (result.get() != null) {
-            result.get().toCompletableFuture().join();
+            try {
+                result.get().toCompletableFuture().join();
+            } catch (CompletionException exception) {
+                operationFailure.compareAndSet(null, exception.getCause());
+            }
         }
 
         assertThat(disconnectFailure.get()).isNull();

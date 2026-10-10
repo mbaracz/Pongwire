@@ -13,6 +13,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 
@@ -152,5 +153,21 @@ class CallbackFailureTest {
         assertThat(errors).as("Rejection should be reported once").singleElement().isInstanceOf(RejectedExecutionException.class);
         assertThat(channel.config().isAutoRead()).as("Rejected callbacks should not keep reading paused").isTrue();
         assertThat(received).as("Only the first message should be handled").containsExactly("first");
+    }
+
+    @Test
+    void shouldFailSubscribeStageWhenMessageIsHandledAfterDisconnect() {
+        List<CompletableFuture<Void>> subscriptions = new ArrayList<>();
+        server.onMessage((session, _) -> subscriptions.add(server.subscribe(session, "topic").toCompletableFuture()));
+        EmbeddedChannel channel = Util.connect(server);
+        Util.sendFromClient(channel, new TextWebSocketFrame("message"));
+
+        // The client disconnects before the queued onMessage runs
+        channel.close();
+        runCallbacks(channel);
+
+        assertThat(subscriptions).as("onMessage should run").hasSize(1);
+        assertThat(subscriptions.getFirst()).as("Subscribe should fail through its stage").isCompletedExceptionally();
+        assertThat(errors).as("Subscribe should not throw from the callback").isEmpty();
     }
 }

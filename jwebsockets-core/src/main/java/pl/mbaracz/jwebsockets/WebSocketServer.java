@@ -280,8 +280,9 @@ public class WebSocketServer<T, D> {
      *
      * @param session The WebSocket session to subscribe.
      * @param topic   The topic to subscribe the session to.
-     * @return A stage completed when any required broker subscription has completed
-     * @throws IllegalStateException If the session is not connected to this server
+     * @return A stage completed when any required broker subscription has completed, or failed with an
+     * IllegalStateException if the session is no longer connected, e.g. when onMessage runs on the callback executor
+     * after the client disconnected
      */
     public CompletionStage<Void> subscribe(WebSocketSession<T, D> session, String topic) {
         PendingBrokerOperation operation = null;
@@ -289,7 +290,7 @@ public class WebSocketServer<T, D> {
 
         synchronized (sessionTopicLock) {
             if (!sessionRegistry.contains(session)) {
-                throw new IllegalStateException("WebSocket session is not connected");
+                return readOnly(CompletableFuture.failedFuture(new IllegalStateException("WebSocket session is not connected")));
             }
 
             sessionTopicRegistry.subscribe(session, topic);
