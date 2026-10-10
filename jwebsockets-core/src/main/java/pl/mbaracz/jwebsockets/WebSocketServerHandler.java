@@ -17,6 +17,7 @@ import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.cookie.Cookie;
 import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
 import io.netty.handler.codec.http.websocketx.*;
+import io.netty.handler.flush.FlushConsolidationHandler;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 import org.slf4j.Logger;
@@ -807,6 +808,13 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                     context.pipeline().context(WebSocketFrameEncoder.class).name(),
                     "outboundCloseInfo",
                     new OutboundCloseInfoHandler()
+                );
+                // Replies written while one read batch is handled leave in one write.
+                // Added after the handshake, so the HTTP response is flushed as before.
+                context.pipeline().addBefore(
+                    context.pipeline().context(WebSocketFrameEncoder.class).name(),
+                    "flushConsolidation",
+                    new FlushConsolidationHandler()
                 );
                 session.setSubprotocol(handshaker.selectedSubprotocol());
                 webSocketServer.addSession(session);
