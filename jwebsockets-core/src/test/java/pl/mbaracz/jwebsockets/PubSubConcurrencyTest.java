@@ -30,7 +30,7 @@ class PubSubConcurrencyTest {
 
     private static List<WebSocketSession<String, Object>> createSessions(int count) {
         return IntStream.range(0, count)
-            .mapToObj(_ -> new WebSocketSession<String, Object>(null, null, null, null))
+            .mapToObj(_ -> new WebSocketSession<String, Object>(null, null, null, null, null))
             .toList();
     }
 

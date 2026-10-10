@@ -9,8 +9,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class SessionTopicRegistryTest {
 
-    private final WebSocketSession<String, Object> alice = new WebSocketSession<>(null, null, null, null);
-    private final WebSocketSession<String, Object> bob = new WebSocketSession<>(null, null, null, null);
+    private final WebSocketSession<String, Object> alice = new WebSocketSession<>(null, null, null, null, null);
+    private final WebSocketSession<String, Object> bob = new WebSocketSession<>(null, null, null, null, null);
     private SessionTopicRegistry<String, Object> registry;
 
     @BeforeEach

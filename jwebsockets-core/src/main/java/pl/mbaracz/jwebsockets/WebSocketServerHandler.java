@@ -32,13 +32,11 @@ import pl.mbaracz.jwebsockets.handler.UpgradeResult;
 import pl.mbaracz.jwebsockets.handler.WritabilityHandler;
 import pl.mbaracz.jwebsockets.message.MessageDecodeException;
 import pl.mbaracz.jwebsockets.message.MessageDecoder;
-import pl.mbaracz.jwebsockets.message.MessageEncoder;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -53,6 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.zip.DataFormatException;
 
@@ -66,7 +65,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
     private static final Logger LOGGER = LoggerFactory.getLogger(WebSocketServerHandler.class);
 
-    private final BiFunction<T, ChannelHandlerContext, ChannelFuture> messageSender;
+    private final BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender;
     private final WebSocketServer<T, D> webSocketServer;
     private final ErrorHandler<T, D> errorHandler;
     private final WebSocketServerObserver<T, D> observer;
@@ -135,19 +134,12 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param configuration the WebSocket server configuration.
      * @return the message sender function, returning the future of the write.
      */
-    private BiFunction<T, ChannelHandlerContext, ChannelFuture> getMessageSender(WebSocketServerConfiguration<T> configuration) {
-        MessageEncoder<T> encoder = configuration.getMessageEncoder();
-
+    private BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> getMessageSender(WebSocketServerConfiguration<T> configuration) {
+        // The payload is encoded once, so a broadcast can wrap the same array for every session
         if (configuration.isRespondWithBinaryFrame()) {
-            return (message, context) -> {
-                ByteBuf byteBuf = Unpooled.wrappedBuffer(encoder.encode(message));
-                return context.writeAndFlush(new BinaryWebSocketFrame(byteBuf));
-            };
+            return (payload, context) -> context.writeAndFlush(new BinaryWebSocketFrame(Unpooled.wrappedBuffer(payload.get())));
         }
-        return (message, context) -> {
-            String stringMessage = new String(encoder.encode(message), StandardCharsets.UTF_8);
-            return context.writeAndFlush(new TextWebSocketFrame(stringMessage));
-        };
+        return (payload, context) -> context.writeAndFlush(new TextWebSocketFrame(Unpooled.wrappedBuffer(payload.get())));
     }
 
     /**
@@ -158,8 +150,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param messageSender the message sender.
      * @return the message sender reporting its failures to the channel pipeline.
      */
-    private BiFunction<T, ChannelHandlerContext, ChannelFuture> observeSendFailures(
-        BiFunction<T, ChannelHandlerContext, ChannelFuture> messageSender
+    private BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> observeSendFailures(
+        BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender
     ) {
         return (message, context) -> {
             ChannelFuture write;
@@ -187,8 +179,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param messageSender the message sender.
      * @return the message sender notifying the observer, or the given one if no observer is set.
      */
-    private BiFunction<T, ChannelHandlerContext, ChannelFuture> observeSentMessages(
-        BiFunction<T, ChannelHandlerContext, ChannelFuture> messageSender
+    private BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> observeSentMessages(
+        BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender
     ) {
         if (observer == null) {
             return messageSender;
@@ -211,8 +203,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     /**
      * Runs the closing check and the write in one event-loop task, ordered with inbound Close handling.
      */
-    private BiFunction<T, ChannelHandlerContext, ChannelFuture> sendOnEventLoop(
-        BiFunction<T, ChannelHandlerContext, ChannelFuture> messageSender
+    private BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> sendOnEventLoop(
+        BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender
     ) {
         return (message, context) -> {
             Channel channel = context.channel();
@@ -248,8 +240,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param messageSender the message sender.
      * @return the message sender rejecting messages while the session is closing.
      */
-    private BiFunction<T, ChannelHandlerContext, ChannelFuture> rejectMessagesWhileClosing(
-        BiFunction<T, ChannelHandlerContext, ChannelFuture> messageSender
+    private BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> rejectMessagesWhileClosing(
+        BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender
     ) {
         return (message, context) -> {
             if (ClosingHandshake.isClosing(context.channel())) {
@@ -268,8 +260,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param backpressurePolicy the configured backpressure policy.
      * @return the sender applying the configured policy.
      */
-    private BiFunction<T, ChannelHandlerContext, ChannelFuture> rejectMessagesUnderBackpressure(
-        BiFunction<T, ChannelHandlerContext, ChannelFuture> messageSender,
+    private BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> rejectMessagesUnderBackpressure(
+        BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender,
         BackpressurePolicy backpressurePolicy
     ) {
         if (backpressurePolicy != BackpressurePolicy.REJECT_NEW) {
@@ -783,6 +775,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         WebSocketSession<T, D> session = new WebSocketSession<>(
             context,
             messageSender,
+            webSocketServer::encode,
             sessionContext,
             configuration.getCloseTimeout()
         );

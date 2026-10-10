@@ -6,10 +6,13 @@ import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Represents a WebSocket session with a client, maintaining connection details and enabling message sending.
@@ -19,7 +22,8 @@ import java.util.function.Consumer;
  */
 public class WebSocketSession<T, D> {
 
-    private final BiFunction<T, ChannelHandlerContext, ChannelFuture> messageSender;
+    private final BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender;
+    private final Function<T, byte[]> encoder;
     private final ChannelHandlerContext channelContext;
     private final D context;
     private final Duration closeTimeout;
@@ -33,13 +37,15 @@ public class WebSocketSession<T, D> {
      */
     WebSocketSession(
         ChannelHandlerContext channelContext,
-        BiFunction<T, ChannelHandlerContext, ChannelFuture> messageSender,
+        BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender,
+        Function<T, byte[]> encoder,
         D context,
         Duration closeTimeout
     ) {
         this.channelContext = channelContext;
         this.connectedSince = Instant.now();
         this.messageSender = messageSender;
+        this.encoder = encoder;
         this.context = context;
         this.closeTimeout = closeTimeout;
     }
@@ -112,27 +118,42 @@ public class WebSocketSession<T, D> {
     /**
      * Sends a message to the client associated with this session.
      * The result of the write is not reported, use {@link #sendMessageAsync(Object)}
-     * to find out whether it succeeded.
+     * to find out whether it succeeded. The message is encoded later on the event loop, so it must not be changed
+     * after this call.
      *
      * @param message The message to be sent.
+     * @throws NullPointerException If the message is null.
      */
     public void sendMessage(T message) {
-        messageSender.apply(message, channelContext);
+        Objects.requireNonNull(message, "Message must not be null!");
+        messageSender.apply(() -> encoder.apply(message), channelContext);
+    }
+
+    /**
+     * Sends a message the server already encoded, e.g. once for every session of a broadcast.
+     *
+     * @param payload the encoded message.
+     */
+    void sendEncoded(byte[] payload) {
+        messageSender.apply(() -> payload, channelContext);
     }
 
     /**
      * Sends a message to the client associated with this session.
+     * The message is encoded later on the event loop, so it must not be changed after this call.
      *
      * @param message The message to be sent.
      * @return A stage that completes when the message is written, or exceptionally
      * when encoding, writing, or backpressure rejection fails the send.
      * It usually completes on the event loop, so use the async methods of the stage for blocking continuations.
+     * @throws NullPointerException If the message is null.
      */
     public CompletionStage<Void> sendMessageAsync(T message) {
+        Objects.requireNonNull(message, "Message must not be null!");
         CompletableFuture<Void> result = new CompletableFuture<>();
 
         try {
-            whenDone(messageSender.apply(message, channelContext), write -> {
+            whenDone(messageSender.apply(() -> encoder.apply(message), channelContext), write -> {
                 if (write.isSuccess()) {
                     result.complete(null);
                 } else {

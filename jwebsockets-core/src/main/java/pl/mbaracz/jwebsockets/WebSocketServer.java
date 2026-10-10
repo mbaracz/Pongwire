@@ -23,6 +23,10 @@ import pl.mbaracz.jwebsockets.handler.UpgradeHandler;
 import pl.mbaracz.jwebsockets.handler.WritabilityHandler;
 
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -398,11 +402,12 @@ public class WebSocketServer<T, D> {
      * Publishes a message to all WebSocket sessions subscribed to a given topic.
      *
      * @param topic   The topic to which the message will be published.
-     * @param message The message to be published.
+     * @param message The message to be published, not null.
      * @return A stage completed when the broker has accepted the message. The operations of one topic reach the broker
      * one at a time, and each fails after the broker operation timeout.
      */
     public CompletionStage<Void> publish(String topic, T message) {
+        Objects.requireNonNull(message, "Message must not be null!");
         PendingBrokerOperation operation;
 
         synchronized (sessionTopicLock) {
@@ -434,13 +439,16 @@ public class WebSocketServer<T, D> {
     private void handleTopicMessage(String topic, T message) {
         Map<EventExecutor, List<WebSocketSession<T, D>>> subscribersByLoop = new HashMap<>();
 
+        // Encoded once for all subscribers, a failure fails the delivery instead of every connection
+        byte[] payload = encode(message);
+
         for (WebSocketSession<T, D> session : sessionTopicRegistry.getSubscribers(topic)) {
             subscribersByLoop.computeIfAbsent(session.getChannelContext().executor(), _ -> new ArrayList<>()).add(session);
         }
 
         subscribersByLoop.forEach((loop, sessions) -> {
             try {
-                loop.execute(() -> sessions.forEach(session -> session.sendMessage(message)));
+                loop.execute(() -> sessions.forEach(session -> session.sendEncoded(payload)));
             } catch (RejectedExecutionException exception) {
                 // The event loop is shutting down and closes its sessions
                 LOGGER.debug("Dropped topic message for {} sessions on a terminated event loop", sessions.size());
@@ -915,12 +923,16 @@ public class WebSocketServer<T, D> {
      *
      * @param message The message to be broadcast
      * @throws IllegalStateException If the server is stopped
+     * @throws NullPointerException  If the message is null
+     * @throws RuntimeException      If the encoder fails, then no session receives the message
      */
     public synchronized void broadcast(T message) {
         if (state == State.STOPPED) {
             throw new IllegalStateException("Server is not running, cannot broadcast!");
         }
-        sessionRegistry.snapshot().forEach(session -> session.sendMessage(message));
+
+        byte[] payload = encode(Objects.requireNonNull(message, "Message must not be null!"));
+        sessionRegistry.snapshot().forEach(session -> session.sendEncoded(payload));
     }
 
     /**
@@ -1008,6 +1020,44 @@ public class WebSocketServer<T, D> {
      */
     void addSession(WebSocketSession<T, D> session) {
         sessionRegistry.register(session);
+    }
+
+    /**
+     * Encodes a message for sending, checking that the encoder returned a value and, for text frames, valid UTF-8.
+     *
+     * @param message the message.
+     * @return the encoded message.
+     */
+    byte[] encode(T message) {
+        byte[] payload = Objects.requireNonNull(configuration.getMessageEncoder().encode(message), "Message encoder returned null!");
+
+        if (!configuration.isRespondWithBinaryFrame() && !isValidUtf8(payload)) {
+            throw new IllegalArgumentException("Message encoder returned invalid UTF-8 for a text frame!");
+        }
+
+        return payload;
+    }
+
+    private static boolean isValidUtf8(byte[] payload) {
+        // Most text is ASCII, which is valid UTF-8 and needs no decoding
+        int i = 0;
+        while (i < payload.length && payload[i] >= 0) {
+            i++;
+        }
+
+        if (i == payload.length) {
+            return true;
+        }
+
+        try {
+            StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(payload, i, payload.length - i));
+            return true;
+        } catch (CharacterCodingException exception) {
+            return false;
+        }
     }
 
     boolean isStopping() {
