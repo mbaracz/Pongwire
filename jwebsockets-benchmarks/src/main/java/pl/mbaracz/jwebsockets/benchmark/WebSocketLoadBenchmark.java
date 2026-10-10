@@ -116,7 +116,7 @@ public final class WebSocketLoadBenchmark {
 
             TimeUnit.SECONDS.sleep(options.holdSeconds());
             int liveAfterHold = countActiveClients();
-            int serverSessionsAfterHold = server.getConnectedSessions().size();
+            int serverSessionsAfterHold = server.getSessionCount();
 
             long expectedMessages = (long) connected.get() * options.messagesPerClient();
             long messageStarted = System.nanoTime();
@@ -127,7 +127,7 @@ public final class WebSocketLoadBenchmark {
             long shutdownStarted = System.nanoTime();
             server.stop();
             long shutdownNanos = System.nanoTime() - shutdownStarted;
-            int sessionsRemaining = server.getConnectedSessions().size();
+            int sessionsRemaining = server.getSessionCount();
 
             long receivedMessages = received.sum();
             long lostMessages = Math.max(0, sent - receivedMessages);

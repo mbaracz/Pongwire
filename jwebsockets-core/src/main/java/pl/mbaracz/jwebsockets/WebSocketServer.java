@@ -31,6 +31,7 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -74,7 +75,8 @@ public class WebSocketServer<T, D> {
     private final SessionRegistry<T, D> sessionRegistry = new SessionRegistry<>();
     private final SessionTopicRegistry<T, D> sessionTopicRegistry = new SessionTopicRegistry<>();
     private final TopicMessageHandler<T> topicMessageHandler = this::handleTopicMessage;
-    private final Map<String, CompletableFuture<Void>> topicBrokerOperations = new HashMap<>();
+    // Read without the lock by publish, changed only under sessionTopicLock
+    private final Map<String, CompletableFuture<Void>> topicBrokerOperations = new ConcurrentHashMap<>();
     private final Map<String, BrokerSubscription> brokerSubscriptions = new HashMap<>();
     private final Object sessionTopicLock = new Object();
 
@@ -407,11 +409,28 @@ public class WebSocketServer<T, D> {
      * one at a time, and each fails after the broker operation timeout.
      */
     public CompletionStage<Void> publish(String topic, T message) {
+        Objects.requireNonNull(topic, "Topic must not be null!");
         Objects.requireNonNull(message, "Message must not be null!");
+        TopicBroker<T> broker = topicBroker;
+
+        // The in-memory broker orders the publishes of a topic itself, so only a pending subscription change needs the chain
+        if (broker instanceof InMemoryTopicBroker<T> && !topicBrokerOperations.containsKey(topic)) {
+            CompletableFuture<Void> result = invokeBroker(() -> broker.publish(topic, message), configuration.getBrokerOperationTimeout())
+                .toCompletableFuture();
+
+            if (!result.isDone()) {
+                // Delivery waits behind another topic of the same stripe, a later subscription change must not overtake it
+                synchronized (sessionTopicLock) {
+                    CompletableFuture<Void> previous = topicBrokerOperations.get(topic);
+                    trackBrokerOperation(topic, previous == null ? result : CompletableFuture.allOf(previous, result));
+                }
+            }
+            return readOnly(result);
+        }
+
         PendingBrokerOperation operation;
 
         synchronized (sessionTopicLock) {
-            TopicBroker<T> broker = topicBroker;
             operation = prepareBrokerOperation(topic, () -> broker.publish(topic, message));
         }
 
@@ -618,15 +637,22 @@ public class WebSocketServer<T, D> {
             .thenCompose(_ -> invokeBroker(invocation, configuration.getBrokerOperationTimeout()))
             .toCompletableFuture();
 
-        topicBrokerOperations.put(topic, result);
-
-        result.whenComplete((_, _) -> {
-            synchronized (sessionTopicLock) {
-                topicBrokerOperations.remove(topic, result);
-            }
-        });
+        trackBrokerOperation(topic, result);
 
         return new PendingBrokerOperation(result, trigger);
+    }
+
+    /**
+     * Makes the operation the last one of the topic until it completes, while the caller holds {@link #sessionTopicLock}.
+     */
+    private void trackBrokerOperation(String topic, CompletableFuture<Void> operation) {
+        topicBrokerOperations.put(topic, operation);
+
+        operation.whenComplete((_, _) -> {
+            synchronized (sessionTopicLock) {
+                topicBrokerOperations.remove(topic, operation);
+            }
+        });
     }
 
     private static CompletionStage<Void> invokeBroker(Supplier<CompletionStage<Void>> invocation, Duration timeout) {
@@ -926,7 +952,7 @@ public class WebSocketServer<T, D> {
      * @throws NullPointerException  If the message is null
      * @throws RuntimeException      If the encoder fails, then no session receives the message
      */
-    public synchronized void broadcast(T message) {
+    public void broadcast(T message) {
         if (state == State.STOPPED) {
             throw new IllegalStateException("Server is not running, cannot broadcast!");
         }
@@ -944,6 +970,15 @@ public class WebSocketServer<T, D> {
      */
     public Collection<WebSocketSession<T, D>> getConnectedSessions() {
         return sessionRegistry.snapshot();
+    }
+
+    /**
+     * Returns the number of connected WebSocket sessions without copying them like {@link #getConnectedSessions()}.
+     *
+     * @return The number of connected sessions
+     */
+    public int getSessionCount() {
+        return sessionRegistry.size();
     }
 
     /**

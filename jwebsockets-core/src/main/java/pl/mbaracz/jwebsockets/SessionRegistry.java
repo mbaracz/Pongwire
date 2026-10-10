@@ -3,30 +3,30 @@ package pl.mbaracz.jwebsockets;
 import io.netty.channel.ChannelId;
 
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Keeps the sessions that completed their WebSocket handshake and have not disconnected yet.
  */
 final class SessionRegistry<T, D> {
 
-    private final Map<ChannelId, WebSocketSession<T, D>> sessions = new HashMap<>();
+    private final Map<ChannelId, WebSocketSession<T, D>> sessions = new ConcurrentHashMap<>();
 
-    synchronized void register(WebSocketSession<T, D> session) {
+    void register(WebSocketSession<T, D> session) {
         sessions.put(session.getChannelContext().channel().id(), session);
     }
 
-    synchronized WebSocketSession<T, D> remove(ChannelId id) {
+    WebSocketSession<T, D> remove(ChannelId id) {
         return sessions.remove(id);
     }
 
-    synchronized WebSocketSession<T, D> get(ChannelId id) {
+    WebSocketSession<T, D> get(ChannelId id) {
         return sessions.get(id);
     }
 
-    synchronized boolean contains(WebSocketSession<T, D> session) {
+    boolean contains(WebSocketSession<T, D> session) {
         if (session == null || session.getChannelContext() == null) {
             return false;
         }
@@ -34,7 +34,11 @@ final class SessionRegistry<T, D> {
         return sessions.get(session.getChannelContext().channel().id()) == session;
     }
 
-    synchronized Collection<WebSocketSession<T, D>> snapshot() {
+    Collection<WebSocketSession<T, D>> snapshot() {
         return List.copyOf(sessions.values());
+    }
+
+    int size() {
+        return sessions.size();
     }
 }

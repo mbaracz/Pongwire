@@ -644,9 +644,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param frame   the WebSocket frame.
      */
     private void handleWebSocketFrame(ChannelHandlerContext context, WebSocketFrame frame) {
-        WebSocketSession<T, D> session = webSocketServer.getSessionByChannelId(context.channel().id());
+        WebSocketSession<T, D> session = openedSession;
 
-        if (session == null) {
+        if (session == null || closeHandled) {
             LOGGER.warn("Received {} while session is null!", frame.getClass());
             return;
         }
