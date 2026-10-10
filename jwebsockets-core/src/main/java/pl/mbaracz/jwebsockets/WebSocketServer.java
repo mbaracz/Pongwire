@@ -322,7 +322,8 @@ public class WebSocketServer<T, D> {
         }
 
         start(operation);
-        return result;
+
+        return readOnly(result);
     }
 
     /**
@@ -354,7 +355,7 @@ public class WebSocketServer<T, D> {
                 : BrokerTransition.completed();
         }
 
-        return transition.start();
+        return readOnly(transition.start());
     }
 
     /**
@@ -375,7 +376,7 @@ public class WebSocketServer<T, D> {
             sessionTopicRegistry.clear();
         }
 
-        return startAll(transitions);
+        return readOnly(startAll(transitions));
     }
 
     /**
@@ -393,7 +394,7 @@ public class WebSocketServer<T, D> {
             operation = prepareBrokerOperation(topic, () -> broker.publish(topic, message));
         }
 
-        return operation.start();
+        return readOnly(operation.start());
     }
 
     /**
@@ -610,6 +611,14 @@ public class WebSocketServer<T, D> {
         } catch (Throwable throwable) {
             return CompletableFuture.failedFuture(throwable);
         }
+    }
+
+    /**
+     * Returns a view of the stage the caller cannot complete, so e.g. orTimeout() or cancel() on it does not change
+     * the broker operations the server tracks.
+     */
+    private static CompletionStage<Void> readOnly(CompletionStage<Void> stage) {
+        return stage.toCompletableFuture().minimalCompletionStage();
     }
 
     private static CompletionStage<Void> start(PendingBrokerOperation operation) {

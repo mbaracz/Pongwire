@@ -135,7 +135,7 @@ class TopicBrokerTest {
         CompletionStage<Void> first = server.subscribe(firstSession, "topic");
         CompletionStage<Void> second = server.subscribe(secondSession, "topic");
 
-        assertThat(second).isSameAs(first);
+        // Both stages follow the one broker subscription
         assertThat(broker.calls).containsExactly("subscribe topic");
 
         IllegalStateException failure = new IllegalStateException("subscribe failed");
@@ -267,5 +267,17 @@ class TopicBrokerTest {
         server.stop();
 
         assertThat(broker.calls).as("Topic should be subscribed again").containsSubsequence("subscribe topic", "unsubscribe topic", "subscribe topic");
+    }
+
+    @Test
+    void shouldKeepTrackingBrokerOperationWhenCallerCompletesReturnedStage() {
+        broker.publishResult = new CompletableFuture<>();
+
+        // A caller giving up on the publish, e.g. with orTimeout() or complete()
+        server.publish("topic", "message").toCompletableFuture().complete(null);
+
+        assertThatThrownBy(() -> server.topicBroker(new RecordingTopicBroker()))
+            .as("The broker operation should still be pending")
+            .isInstanceOf(IllegalStateException.class);
     }
 }
