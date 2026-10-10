@@ -14,6 +14,8 @@ import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -82,6 +84,18 @@ class IdleTimeoutTest {
 
         advanceTime(channel, 1);
         assertIdleTimeout(channel);
+    }
+
+    @Test
+    void shouldRecordLastMessageTimeWhenMessageArrives() {
+        EmbeddedChannel channel = connect();
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        assertThat(session.getLastMessageTime()).as("No message yet").isNull();
+        Instant before = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+
+        Util.sendFromClient(channel, new TextWebSocketFrame("text"));
+
+        assertThat(session.getLastMessageTime()).as("Last message time").isBetween(before, Instant.now());
     }
 
     @Test

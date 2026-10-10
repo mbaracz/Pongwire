@@ -101,6 +101,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
     // Pending close when no application message is received for the configured time
     private ScheduledFuture<?> idleTimeout;
+    private long lastActivityNanos;
 
     // Pending close of a connection whose write buffer does not drain, cancelled when it becomes writable again,
     // and the pending bytes when it was scheduled, so a slowly draining buffer starts a new timeout
@@ -119,7 +120,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         this.messageSender = sendOnEventLoop(
             rejectMessagesWhileClosing(
                 rejectMessagesUnderBackpressure(
-                    observeSentMessages(observeSendFailures(getMessageSender(webSocketServer.getConfiguration()))),
+                    observeSends(getMessageSender(webSocketServer.getConfiguration())),
                     webSocketServer.getConfiguration().getBackpressurePolicy()
                 )
             )
@@ -144,14 +145,15 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     }
 
     /**
-     * Reports encoder and write failures through the same channel exception path as inbound failures.
+     * Reports encoder and write failures through the same channel exception path as inbound failures,
+     * and notifies the observer about every message written.
      * Encoder exceptions are converted to failed futures so asynchronous callers always receive
      * them through their stage.
      *
      * @param messageSender the message sender.
-     * @return the message sender reporting its failures to the channel pipeline.
+     * @return the message sender observing its writes.
      */
-    private BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> observeSendFailures(
+    private BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> observeSends(
         BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender
     ) {
         return (message, context) -> {
@@ -163,37 +165,15 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                 write = context.channel().newFailedFuture(exception);
             }
 
-            // A send racing the closure of the session fails only the caller's stage, the session was already reported closed
             write.addListener(result -> {
-                if (!result.isSuccess() && !closeHandled && context.channel().isActive()) {
+                if (result.isSuccess()) {
+                    // The listener runs on the event loop, where the session was opened before it could send anything
+                    if (observer != null) {
+                        notifyObserver(observer -> observer.messageSent(openedSession));
+                    }
+                } else if (!closeHandled && context.channel().isActive()) {
+                    // A send racing the closure of the session fails only the caller's stage, the session was already reported closed
                     handleFailure(context, result.cause());
-                }
-            });
-
-            return write;
-        };
-    }
-
-    /**
-     * Notifies the observer about every message written by the message sender.
-     *
-     * @param messageSender the message sender.
-     * @return the message sender notifying the observer, or the given one if no observer is set.
-     */
-    private BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> observeSentMessages(
-        BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender
-    ) {
-        if (observer == null) {
-            return messageSender;
-        }
-
-        return (message, context) -> {
-            ChannelFuture write = messageSender.apply(message, context);
-
-            // The listener runs on the event loop, where the session was opened before it could send anything
-            write.addListener(it -> {
-                if (it.isSuccess()) {
-                    notifyObserver(observer -> observer.messageSent(openedSession));
                 }
             });
 
@@ -629,7 +609,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         }
         session.updateLastMessageTime();
         resetIdleTimeout(session.getChannelContext().channel());
-        notifyObserver(observer -> observer.messageReceived(session));
+
+        // Checked here, so a server without an observer does not allocate the notification
+        if (observer != null) {
+            notifyObserver(observer -> observer.messageReceived(session));
+        }
 
         MessageHandler<T, D> messageHandler = webSocketServer.getMessageHandler();
 
@@ -994,6 +978,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     /**
      * Restarts the timeout that tracks application-level inactivity.
      * Only successfully decoded text and binary messages call this method after the session is opened.
+     * It only records the time, and the pending task checks it when it fires, like Netty's IdleStateHandler.
      *
      * @param channel the channel of the session.
      */
@@ -1004,9 +989,15 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             return;
         }
 
-        cancelIdleTimeout();
-        idleTimeout = channel.eventLoop()
-            .schedule(() -> closeOnIdleTimeout(channel), timeout.toNanos(), TimeUnit.NANOSECONDS);
+        lastActivityNanos = channel.eventLoop().ticker().nanoTime();
+
+        if (idleTimeout == null) {
+            scheduleIdleTimeout(channel, timeout.toNanos());
+        }
+    }
+
+    private void scheduleIdleTimeout(Channel channel, long delayNanos) {
+        idleTimeout = channel.eventLoop().schedule(() -> closeOnIdleTimeout(channel), delayNanos, TimeUnit.NANOSECONDS);
     }
 
     /**
@@ -1035,6 +1026,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param channel the channel of the session.
      */
     private void closeOnIdleTimeout(Channel channel) {
+        idleTimeout = null;
+
         // The task may run after the socket closed, before channelInactive() cancelled it
         if (!channel.isActive()) {
             return;
@@ -1043,6 +1036,14 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         // The client's messages wait unread while the server stopped reading for its pending callbacks
         if (!channel.config().isAutoRead()) {
             resetIdleTimeout(channel);
+            return;
+        }
+
+        long timeout = webSocketServer.getConfiguration().getIdleTimeout().toNanos();
+        long remaining = timeout - (channel.eventLoop().ticker().nanoTime() - lastActivityNanos);
+
+        if (remaining > 0) {
+            scheduleIdleTimeout(channel, remaining);
             return;
         }
 

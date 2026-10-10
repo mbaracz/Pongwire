@@ -29,7 +29,8 @@ public class WebSocketSession<T, D> {
     private final Duration closeTimeout;
     private final Instant connectedSince;
     private final CompletableFuture<Void> closed = new CompletableFuture<>();
-    private volatile Instant lastMessageTime;
+    // Epoch milliseconds, 0 until the first message, so receiving a message allocates nothing
+    private volatile long lastMessageMillis;
     private volatile String subprotocol;
 
     /**
@@ -61,14 +62,15 @@ public class WebSocketSession<T, D> {
      * @return The instant when the last message was received, or null if no message has been received.
      */
     public Instant getLastMessageTime() {
-        return lastMessageTime;
+        long millis = lastMessageMillis;
+        return millis == 0 ? null : Instant.ofEpochMilli(millis);
     }
 
     /**
      * Updates the last message time to the current date and time.
      */
     void updateLastMessageTime() {
-        this.lastMessageTime = Instant.now();
+        this.lastMessageMillis = System.currentTimeMillis();
     }
 
     /**

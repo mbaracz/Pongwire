@@ -129,6 +129,8 @@ server.configure(config -> config.setCallbackExecutor(executor));
 - The stages returned by `publish`, `subscribe` and `unsubscribe` complete on the thread that completes the broker
   operation, which can be an event loop or a thread of the broker.
   Calling `stop()` from such a continuation fails on an event loop, so use `thenRunAsync` for it as well.
+- The message decoder and encoder run on the event loop, also with a `callbackExecutor`, so large messages with an
+  expensive codec delay the other sessions of that loop.
 - The application owns the configured executor and is responsible for shutting it down.
 
 ## Production behavior
@@ -160,6 +162,10 @@ Heartbeat is disabled by default. When enabled, inbound data delays the next pin
 
 `idleTimeout` is separate and resets only on successfully decoded text or binary messages. Control frames do not reset
 it.
+
+Neither timer is randomized.
+Sessions that connected together, e.g. after a restart, reach their idle timeout together, so clients should
+reconnect with a random delay.
 
 ### Backpressure
 
