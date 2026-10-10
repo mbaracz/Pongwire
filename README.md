@@ -126,6 +126,9 @@ server.configure(config -> config.setCallbackExecutor(executor));
 - `sendMessage` and `sendMessageAsync` are safe to call from other threads and concurrently. Concurrent sends do not have a defined relative order.
 - The stages returned by `sendMessageAsync` and `close` usually complete on the event loop. Use the `*Async` methods of
   the stage, e.g. `thenRunAsync`, for continuations that block.
+- The stages returned by `publish`, `subscribe` and `unsubscribe` complete on the thread that completes the broker
+  operation, which can be an event loop or a thread of the broker.
+  Calling `stop()` from such a continuation fails on an event loop, so use `thenRunAsync` for it as well.
 - The application owns the configured executor and is responsible for shutting it down.
 
 ## Production behavior

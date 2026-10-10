@@ -7,6 +7,12 @@ import java.util.concurrent.CompletionStage;
  * Implementations must be thread-safe and must not perform blocking I/O on the calling thread.
  * Calls to a handler for the same topic must be ordered and must not overlap.
  * Different topics may be delivered concurrently.
+ *
+ * The server may call the next operation of a topic from the thread that completes the stage of the previous one,
+ * so do not complete a stage while holding a lock that the broker methods also take.
+ * {@link TopicMessageHandler#onMessage} encodes the message and queues it for the sessions without blocking,
+ * so it may be called from any thread, including an I/O thread of the broker.
+ *
  * Broker lifecycle is owned by the application.
  *
  * @param <T> the topic message type
