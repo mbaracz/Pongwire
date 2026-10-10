@@ -168,6 +168,7 @@ class ServerReconfigurationTest {
             .setHeartbeatTimeout(Duration.ofSeconds(5))
             .setIdleTimeout(Duration.ofMinutes(5))
             .setCloseTimeout(Duration.ofSeconds(3))
+            .setBrokerOperationTimeout(Duration.ofSeconds(4))
             .setCallbackExecutor(callbackExecutor)
             .setMaxPendingCallbacks(16)
             .setWriteBufferWaterMark(1024, 2048)
@@ -197,6 +198,7 @@ class ServerReconfigurationTest {
             softly.assertThat(configuration.getHeartbeatTimeout()).as("heartbeatTimeout").isEqualTo(Duration.ofSeconds(5));
             softly.assertThat(configuration.getIdleTimeout()).as("idleTimeout").isEqualTo(Duration.ofMinutes(5));
             softly.assertThat(configuration.getCloseTimeout()).as("closeTimeout").isEqualTo(Duration.ofSeconds(3));
+            softly.assertThat(configuration.getBrokerOperationTimeout()).as("brokerOperationTimeout").isEqualTo(Duration.ofSeconds(4));
             softly.assertThat(configuration.getCallbackExecutor()).as("callbackExecutor").isSameAs(callbackExecutor);
             softly.assertThat(configuration.getMaxPendingCallbacks()).as("maxPendingCallbacks").isEqualTo(16);
             softly.assertThat(configuration.getWriteBufferLowWaterMark()).as("writeBufferLowWaterMark").isEqualTo(1024);
@@ -285,6 +287,8 @@ class ServerReconfigurationTest {
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setIdleTimeout(Duration.ZERO)))
                 .isInstanceOf(IllegalArgumentException.class);
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setCloseTimeout(Duration.ZERO)))
+                .isInstanceOf(IllegalArgumentException.class);
+            softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setBrokerOperationTimeout(null)))
                 .isInstanceOf(IllegalArgumentException.class);
             softly.assertThatThrownBy(() -> server.configure(configurer -> configurer.setUnwritableTimeout(Duration.ZERO)))
                 .isInstanceOf(IllegalArgumentException.class);

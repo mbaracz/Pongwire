@@ -300,7 +300,7 @@ public class WebSocketServer<T, D> {
             );
 
             if (subscription.status == BrokerSubscriptionStatus.SUBSCRIBED) {
-                result = CompletableFuture.completedFuture(null);
+                return readOnly(CompletableFuture.completedFuture(null));
             } else if (subscription.status == BrokerSubscriptionStatus.SUBSCRIBING) {
                 result = subscription.transition;
             } else if (subscription.status == BrokerSubscriptionStatus.UNSUBSCRIBING) {
@@ -320,6 +320,20 @@ public class WebSocketServer<T, D> {
                 );
             }
         }
+
+        // A failed broker subscription leaves the session unsubscribed, so the failed stage tells the whole truth
+        result.whenComplete((_, failure) -> {
+            if (failure != null) {
+                synchronized (sessionTopicLock) {
+                    sessionTopicRegistry.unsubscribe(session, topic);
+                    BrokerSubscription subscription = brokerSubscriptions.get(topic);
+
+                    if (subscription != null && subscription.transition == null && !sessionTopicRegistry.hasSubscribers(topic)) {
+                        brokerSubscriptions.remove(topic, subscription);
+                    }
+                }
+            }
+        });
 
         start(operation);
 
@@ -384,7 +398,8 @@ public class WebSocketServer<T, D> {
      *
      * @param topic   The topic to which the message will be published.
      * @param message The message to be published.
-     * @return A stage completed when the broker has accepted the message
+     * @return A stage completed when the broker has accepted the message. The operations of one topic reach the broker
+     * one at a time, and each fails after the broker operation timeout.
      */
     public CompletionStage<Void> publish(String topic, T message) {
         PendingBrokerOperation operation;
@@ -591,7 +606,7 @@ public class WebSocketServer<T, D> {
 
         CompletableFuture<Void> result = predecessor
             .thenCompose(_ -> trigger)
-            .thenCompose(_ -> invokeBroker(invocation))
+            .thenCompose(_ -> invokeBroker(invocation, configuration.getBrokerOperationTimeout()))
             .toCompletableFuture();
 
         topicBrokerOperations.put(topic, result);
@@ -605,9 +620,12 @@ public class WebSocketServer<T, D> {
         return new PendingBrokerOperation(result, trigger);
     }
 
-    private static CompletionStage<Void> invokeBroker(Supplier<CompletionStage<Void>> invocation) {
+    private static CompletionStage<Void> invokeBroker(Supplier<CompletionStage<Void>> invocation, Duration timeout) {
         try {
-            return Objects.requireNonNull(invocation.get(), "Topic broker returned a null CompletionStage");
+            CompletionStage<Void> stage = Objects.requireNonNull(invocation.get(), "Topic broker returned a null CompletionStage");
+
+            // A copy times out, so a stuck broker call fails this operation without completing the broker's own stage
+            return stage.toCompletableFuture().copy().orTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS);
         } catch (Throwable throwable) {
             return CompletableFuture.failedFuture(throwable);
         }

@@ -7,10 +7,12 @@ import org.junit.jupiter.api.Test;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -149,8 +151,8 @@ class TopicBrokerTest {
 
         assertThat(broker.calls).containsExactly("subscribe topic");
         assertThat(replacement.calls).containsExactly("subscribe topic");
-        assertThat(server.isSubscribed(firstSession, "topic")).isTrue();
-        assertThat(server.isSubscribed(secondSession, "topic")).isTrue();
+        assertThat(server.isSubscribed(firstSession, "topic")).as("Failed subscription should be rolled back").isFalse();
+        assertThat(server.isSubscribed(secondSession, "topic")).as("Retried subscription should succeed").isTrue();
     }
 
     @Test
@@ -279,5 +281,32 @@ class TopicBrokerTest {
         assertThatThrownBy(() -> server.topicBroker(new RecordingTopicBroker()))
             .as("The broker operation should still be pending")
             .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void shouldRollBackLocalSubscriptionWhenBrokerSubscribeFails() {
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        broker.subscribeResult = CompletableFuture.failedFuture(new IllegalStateException("broker unavailable"));
+
+        CompletableFuture<Void> subscribe = server.subscribe(session, "topic").toCompletableFuture();
+
+        assertThat(subscribe).as("Subscribe should fail").isCompletedExceptionally();
+        assertThat(server.isSubscribed(session, "topic")).as("Session should not stay subscribed").isFalse();
+        assertThat(server.getTopics()).as("Topic should not stay registered").isEmpty();
+    }
+
+    @Test
+    void shouldFailBrokerOperationThatDoesNotCompleteInTime() {
+        server.configure(configurer -> configurer.setBrokerOperationTimeout(Duration.ofMillis(100)));
+        broker.publishResult = new CompletableFuture<>();
+
+        CompletableFuture<Void> stuck = server.publish("topic", "first").toCompletableFuture();
+
+        assertThat(stuck).as("Stuck publish should fail").failsWithin(5, TimeUnit.SECONDS);
+
+        // The next operation of the topic is no longer blocked
+        broker.publishResult = CompletableFuture.completedFuture(null);
+        assertThat(server.publish("topic", "second").toCompletableFuture()).succeedsWithin(5, TimeUnit.SECONDS);
     }
 }

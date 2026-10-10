@@ -82,6 +82,11 @@ public final class WebSocketServerConfiguration<T> {
     private final Duration closeTimeout;
 
     /**
+     * Time a topic broker operation may take before it fails.
+     */
+    private final Duration brokerOperationTimeout;
+
+    /**
      * Executor running the application callbacks, null to run them on the event loop.
      */
     private final Executor callbackExecutor;
@@ -154,6 +159,7 @@ public final class WebSocketServerConfiguration<T> {
         this.heartbeatTimeout = builder.heartbeatTimeout;
         this.idleTimeout = builder.idleTimeout;
         this.closeTimeout = builder.closeTimeout;
+        this.brokerOperationTimeout = builder.brokerOperationTimeout;
         this.callbackExecutor = builder.callbackExecutor;
         this.maxPendingCallbacks = builder.maxPendingCallbacks;
         this.writeBufferLowWaterMark = builder.writeBufferLowWaterMark;
@@ -198,6 +204,7 @@ public final class WebSocketServerConfiguration<T> {
         builder.heartbeatTimeout = heartbeatTimeout;
         builder.idleTimeout = idleTimeout;
         builder.closeTimeout = closeTimeout;
+        builder.brokerOperationTimeout = brokerOperationTimeout;
         builder.callbackExecutor = callbackExecutor;
         builder.maxPendingCallbacks = maxPendingCallbacks;
         builder.writeBufferLowWaterMark = writeBufferLowWaterMark;
@@ -263,6 +270,10 @@ public final class WebSocketServerConfiguration<T> {
 
     public Duration getCloseTimeout() {
         return closeTimeout;
+    }
+
+    public Duration getBrokerOperationTimeout() {
+        return brokerOperationTimeout;
     }
 
     public Executor getCallbackExecutor() {
@@ -336,6 +347,7 @@ public final class WebSocketServerConfiguration<T> {
         private Duration heartbeatTimeout = Duration.ofSeconds(10);
         private Duration idleTimeout;
         private Duration closeTimeout = Duration.ofSeconds(5);
+        private Duration brokerOperationTimeout = Duration.ofSeconds(30);
         private Executor callbackExecutor;
         private int maxPendingCallbacks = 64;
         private Integer writeBufferLowWaterMark;
@@ -497,6 +509,22 @@ public final class WebSocketServerConfiguration<T> {
             }
             requireSchedulable(closeTimeout, "Close timeout");
             this.closeTimeout = closeTimeout;
+            return this;
+        }
+
+        /**
+         * Sets how long a topic broker operation (subscribe, unsubscribe or publish) may take before it fails, so a broker
+         * that does not answer does not block the later operations of the topic.
+         *
+         * @param brokerOperationTimeout Broker operation timeout, positive, 30 seconds by default.
+         * @return This builder.
+         */
+        public Builder<T> setBrokerOperationTimeout(Duration brokerOperationTimeout) {
+            if (brokerOperationTimeout == null || !brokerOperationTimeout.isPositive()) {
+                throw new IllegalArgumentException("Broker operation timeout must be positive!");
+            }
+            requireSchedulable(brokerOperationTimeout, "Broker operation timeout");
+            this.brokerOperationTimeout = brokerOperationTimeout;
             return this;
         }
 
