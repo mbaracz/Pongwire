@@ -635,11 +635,16 @@ public final class WebSocketServerConfiguration<T> {
         /**
          * Sets the supported subprotocols.
          * The handshake selects the first subprotocol requested by the client that is also supported.
+         * Once any is set, a client that requests none of them is rejected with 400 (Bad Request).
          *
-         * @param subprotocols Supported subprotocols.
+         * @param subprotocols Supported subprotocols, not "*".
          * @return This builder.
+         * @throws IllegalArgumentException If a subprotocol is "*", which Netty would treat as accepting any requested one.
          */
         public Builder<T> setSubprotocols(String... subprotocols) {
+            if (List.of(subprotocols).contains("*")) {
+                throw new IllegalArgumentException("Subprotocol must not be a wildcard!");
+            }
             this.subprotocols = List.of(subprotocols);
             return this;
         }

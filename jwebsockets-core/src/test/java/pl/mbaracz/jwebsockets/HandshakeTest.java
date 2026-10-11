@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class HandshakeTest {
 
@@ -299,19 +300,41 @@ class HandshakeTest {
         assertThat(opened.getFirst().getSubprotocol()).as("Session should have the selected subprotocol").isEqualTo("superchat");
     }
 
-    @Test
-    void shouldSelectNoSubprotocolWhenNoRequestedOneIsSupported() {
+    @ParameterizedTest
+    @ValueSource(strings = {"chat", "chat, superchat2", ""})
+    void shouldRespondWithBadRequestWhenNoRequestedSubprotocolIsSupported(String requested) {
         server.configure(configurer -> configurer.setSubprotocols("superchat"));
 
         FullHttpRequest request = Util.createHttpRequest("/chat");
-        request.headers().set(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL, "chat");
+        if (!requested.isEmpty()) {
+            request.headers().set(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL, requested);
+        }
 
         HttpResponse response = sendRequest(request);
 
-        // Assert the connection was upgraded without a subprotocol
+        assertThat(response.status()).as("Should reject the upgrade").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+        assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
+    @Test
+    void shouldSelectSubprotocolWhenItIsRequestedInLaterHeaderLine() {
+        server.configure(configurer -> configurer.setSubprotocols("superchat"));
+
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers()
+            .add(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL, "chat")
+            .add(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL, "superchat");
+
+        HttpResponse response = sendRequest(request);
+
         assertThat(response.status()).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
-        assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL)).as("Should not select a subprotocol").isNull();
-        assertThat(opened.getFirst().getSubprotocol()).as("Session should have no subprotocol").isNull();
+        assertThat(opened.getFirst().getSubprotocol()).as("Selected subprotocol").isEqualTo("superchat");
+    }
+
+    @Test
+    void shouldRejectWildcardSubprotocol() {
+        assertThatThrownBy(() -> server.configure(configurer -> configurer.setSubprotocols("chat", "*")))
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

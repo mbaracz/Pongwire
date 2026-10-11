@@ -499,6 +499,29 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     }
 
     /**
+     * Checks that the client requests one of the configured subprotocols.
+     * The header may list several, separated by commas (RFC 6455, section 4.1).
+     *
+     * @param request   the HTTP request.
+     * @param supported the configured subprotocols.
+     * @return true if one of the requested subprotocols is supported.
+     */
+    private static boolean requestsSupportedSubprotocol(FullHttpRequest request, List<String> supported) {
+        String header = request.headers().get(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL);
+
+        if (header == null) {
+            return false;
+        }
+
+        for (String requested : header.split(",")) {
+            if (supported.contains(requested.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Checks that the Sec-WebSocket-Key header is a Base64-encoded 16-byte value (RFC 6455, section 4.1).
      *
      * @param request the HTTP request.
@@ -781,6 +804,17 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         }
 
         if (!isValidKey(request)) {
+            sendResponse(context, HttpResponseStatus.BAD_REQUEST);
+            return;
+        }
+
+        // Netty reads only the first line of the header when it selects the subprotocol
+        List<String> requestedSubprotocols = request.headers().getAll(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL);
+        if (requestedSubprotocols.size() > 1) {
+            request.headers().set(HttpHeaderNames.SEC_WEBSOCKET_PROTOCOL, String.join(", ", requestedSubprotocols));
+        }
+
+        if (!supportedSubprotocols.isEmpty() && !requestsSupportedSubprotocol(request, supportedSubprotocols)) {
             sendResponse(context, HttpResponseStatus.BAD_REQUEST);
             return;
         }
