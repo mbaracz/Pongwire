@@ -126,6 +126,11 @@ public final class WebSocketServerConfiguration<T> {
     private final Pattern allowedOriginPattern;
 
     /**
+     * Whether an upgrade without an Origin header passes the origin check.
+     */
+    private final boolean allowMissingOrigin;
+
+    /**
      * Subprotocols the server supports, empty if subprotocols are not negotiated.
      */
     private final List<String> subprotocols;
@@ -168,6 +173,7 @@ public final class WebSocketServerConfiguration<T> {
         this.unwritableTimeout = builder.unwritableTimeout;
         this.allowedOrigins = builder.allowedOrigins;
         this.allowedOriginPattern = builder.allowedOriginPattern;
+        this.allowMissingOrigin = builder.allowMissingOrigin;
         this.subprotocols = builder.subprotocols;
         this.compressionEnabled = builder.compressionEnabled;
         this.messageEncoder = builder.messageEncoder;
@@ -213,6 +219,7 @@ public final class WebSocketServerConfiguration<T> {
         builder.unwritableTimeout = unwritableTimeout;
         builder.allowedOrigins = allowedOrigins;
         builder.allowedOriginPattern = allowedOriginPattern;
+        builder.allowMissingOrigin = allowMissingOrigin;
         builder.subprotocols = subprotocols;
         builder.compressionEnabled = compressionEnabled;
         builder.messageEncoder = messageEncoder;
@@ -308,6 +315,10 @@ public final class WebSocketServerConfiguration<T> {
         return allowedOriginPattern;
     }
 
+    public boolean isAllowMissingOrigin() {
+        return allowMissingOrigin;
+    }
+
     public List<String> getSubprotocols() {
         return subprotocols;
     }
@@ -356,6 +367,7 @@ public final class WebSocketServerConfiguration<T> {
         private Duration unwritableTimeout;
         private List<String> allowedOrigins;
         private Pattern allowedOriginPattern;
+        private boolean allowMissingOrigin;
         private List<String> subprotocols = List.of();
         private boolean compressionEnabled;
         private MessageEncoder<T> messageEncoder;
@@ -612,6 +624,9 @@ public final class WebSocketServerConfiguration<T> {
 
         /**
          * Sets the allowed origins.
+         * Once allowed origins or an origin pattern are set, an upgrade is accepted only if its Origin header is in the
+         * list or matches the pattern, and a request without one only if missing origins are allowed.
+         * The list is compared exactly, e.g. {@code https://app.example.com}, without a trailing slash.
          *
          * @param origins Allowed origins.
          * @return This builder.
@@ -623,6 +638,9 @@ public final class WebSocketServerConfiguration<T> {
 
         /**
          * Sets the allowed origins.
+         * Once allowed origins or an origin pattern are set, an upgrade is accepted only if its Origin header is in the
+         * list or matches the pattern, and a request without one only if missing origins are allowed.
+         * The list is compared exactly, e.g. {@code https://app.example.com}, without a trailing slash.
          *
          * @param origins List of allowed origins.
          * @return This builder.
@@ -661,13 +679,27 @@ public final class WebSocketServerConfiguration<T> {
         }
 
         /**
-         * Sets the allowed origin pattern.
+         * Sets the allowed origin pattern, matched against the whole Origin header.
+         * An origin is accepted if it matches the pattern or is one of the allowed origins.
          *
          * @param pattern Pattern for allowed origins.
          * @return This builder.
          */
         public Builder<T> setAllowedOriginPattern(Pattern pattern) {
             this.allowedOriginPattern = pattern;
+            return this;
+        }
+
+        /**
+         * Sets whether an upgrade without an Origin header passes the origin check, e.g. from a native or server client.
+         * Browsers always send the header, so allowing it does not open the server to other web pages.
+         * It has no effect while neither allowed origins nor an origin pattern are set, then every upgrade passes.
+         *
+         * @param allowMissingOrigin True to accept upgrades without an Origin header, false to reject them (default).
+         * @return This builder.
+         */
+        public Builder<T> setAllowMissingOrigin(boolean allowMissingOrigin) {
+            this.allowMissingOrigin = allowMissingOrigin;
             return this;
         }
 

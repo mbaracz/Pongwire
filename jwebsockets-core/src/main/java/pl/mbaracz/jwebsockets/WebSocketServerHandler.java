@@ -565,36 +565,22 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @return true if the origin is allowed, false otherwise.
      */
     private boolean isUpgradeFromAllowedOrigin(FullHttpRequest request) {
-        String origin = request.headers().get(HttpHeaderNames.ORIGIN);
         WebSocketServerConfiguration<T> configuration = webSocketServer.getConfiguration();
+        List<String> allowedOrigins = configuration.getAllowedOrigins();
+        Pattern allowedOriginPattern = configuration.getAllowedOriginPattern();
 
-        if (isOriginNotAllowedByPattern(origin, configuration.getAllowedOriginPattern())) {
-            return false;
+        if (allowedOrigins == null && allowedOriginPattern == null) {
+            return true;
         }
 
-        return isOriginAllowedInList(origin, configuration.getAllowedOrigins());
-    }
+        String origin = request.headers().get(HttpHeaderNames.ORIGIN);
 
-    /**
-     * Checks if the origin is not allowed based on the configured pattern.
-     *
-     * @param origin               the origin header value.
-     * @param allowedOriginPattern the pattern for allowed origins.
-     * @return true if the origin is not allowed, false otherwise.
-     */
-    private boolean isOriginNotAllowedByPattern(String origin, Pattern allowedOriginPattern) {
-        return allowedOriginPattern != null && (origin == null || !allowedOriginPattern.matcher(origin).matches());
-    }
+        if (origin == null) {
+            return configuration.isAllowMissingOrigin();
+        }
 
-    /**
-     * Checks if the origin is allowed based on the configured list of allowed origins.
-     *
-     * @param origin         the origin header value.
-     * @param allowedOrigins the list of allowed origins.
-     * @return true if the origin is allowed, false otherwise.
-     */
-    private boolean isOriginAllowedInList(String origin, List<String> allowedOrigins) {
-        return allowedOrigins == null || (origin != null && allowedOrigins.contains(origin));
+        return allowedOrigins != null && allowedOrigins.contains(origin)
+            || allowedOriginPattern != null && allowedOriginPattern.matcher(origin).matches();
     }
 
     /**

@@ -109,6 +109,23 @@ The same context is available later through `session.getContext()`.
 
 The library keeps the reference as-is and does not manage the object's mutability.
 
+### Allowed origins
+
+Origins are not checked by default.
+A server that authenticates the upgrade with a cookie must restrict them, because a browser attaches the cookie also
+when another web page opens the connection (Cross-Site WebSocket Hijacking):
+
+```java
+server.configure(config -> config
+    .setAllowedOrigins("https://app.example.com")
+    .setAllowedOriginPattern(Pattern.compile("https://[a-z0-9-]+\\.preview\\.example\\.com"))
+);
+```
+
+An origin is accepted if it is in the list or matches the pattern, others get `403`.
+Browsers always send `Origin`, native and server clients usually do not, so a request without it is rejected once
+origins are checked, unless `setAllowMissingOrigin(true)` allows it.
+
 ## Threading model
 
 Callbacks run on the session's Netty event loop by default, so they should not block.

@@ -7,6 +7,8 @@ import io.netty.util.CharsetUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
@@ -240,6 +242,62 @@ class ConnectionTest {
             assertThat(channel.isOpen()).as("Channel should be closed").isFalse();
             assertThat(channel.isActive()).as("Channel should not be active").isFalse();
             response.release();
+        }
+
+        /**
+         * Sends an upgrade request with the given Origin header, or none, and returns the response status.
+         */
+        private HttpResponseStatus upgradeWithOrigin(String origin) {
+            EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerHandler<>(server));
+            channel.pipeline().addFirst(new HttpServerCodec());
+            FullHttpRequest request = Util.createHttpRequest("/");
+            if (origin != null) {
+                request.headers().add(HttpHeaderNames.ORIGIN, origin);
+            }
+            channel.writeInbound(request);
+
+            EmbeddedChannel client = Util.newEmbeddedChannel(new HttpResponseDecoder());
+            ByteBuf buffer;
+            while ((buffer = channel.readOutbound()) != null) {
+                client.writeInbound(buffer);
+            }
+            HttpResponse response = client.readInbound();
+            return response.status();
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"https://app.example.com", "https://pr-1.preview.example.com"})
+        void shouldAcceptOriginInListOrMatchingPatternWhenBothAreSet(String origin) {
+            server.configure(configurer -> configurer
+                .setAllowedOrigins("https://app.example.com")
+                .setAllowedOriginPattern(Pattern.compile("https://[a-z0-9-]+\\.preview\\.example\\.com"))
+            );
+
+            assertThat(upgradeWithOrigin(origin)).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
+        }
+
+        @Test
+        void shouldForbidOriginInNeitherListNorPattern() {
+            server.configure(configurer -> configurer
+                .setAllowedOrigins("https://app.example.com")
+                .setAllowedOriginPattern(Pattern.compile("https://[a-z0-9-]+\\.preview\\.example\\.com"))
+            );
+
+            assertThat(upgradeWithOrigin("https://evil.example")).as("Should forbid").isEqualTo(HttpResponseStatus.FORBIDDEN);
+        }
+
+        @Test
+        void shouldAcceptMissingOriginWhenItIsAllowed() {
+            server.configure(configurer -> configurer.setAllowedOrigins("https://app.example.com").setAllowMissingOrigin(true));
+
+            assertThat(upgradeWithOrigin(null)).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
+            assertThat(upgradeWithOrigin("https://evil.example")).as("Other origins stay forbidden").isEqualTo(HttpResponseStatus.FORBIDDEN);
+        }
+
+        @Test
+        void shouldAcceptAnyOriginWhenOriginsAreNotConfigured() {
+            assertThat(upgradeWithOrigin(null)).as("Without origin").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
+            assertThat(upgradeWithOrigin("https://evil.example")).as("Any origin").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
         }
     }
 }
