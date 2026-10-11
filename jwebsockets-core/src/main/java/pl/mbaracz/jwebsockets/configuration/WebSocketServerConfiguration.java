@@ -97,6 +97,16 @@ public final class WebSocketServerConfiguration<T> {
     private final int maxPendingCallbacks;
 
     /**
+     * Open connections the server accepts, 0 for no limit.
+     */
+    private final int maxConnections;
+
+    /**
+     * Open connections the server accepts from one IP address, 0 for no limit.
+     */
+    private final int maxConnectionsPerAddress;
+
+    /**
      * Low write buffer watermark in bytes, or null to use the Netty default.
      */
     private final Integer writeBufferLowWaterMark;
@@ -167,6 +177,8 @@ public final class WebSocketServerConfiguration<T> {
         this.brokerOperationTimeout = builder.brokerOperationTimeout;
         this.callbackExecutor = builder.callbackExecutor;
         this.maxPendingCallbacks = builder.maxPendingCallbacks;
+        this.maxConnections = builder.maxConnections;
+        this.maxConnectionsPerAddress = builder.maxConnectionsPerAddress;
         this.writeBufferLowWaterMark = builder.writeBufferLowWaterMark;
         this.writeBufferHighWaterMark = builder.writeBufferHighWaterMark;
         this.backpressurePolicy = builder.backpressurePolicy;
@@ -213,6 +225,8 @@ public final class WebSocketServerConfiguration<T> {
         builder.brokerOperationTimeout = brokerOperationTimeout;
         builder.callbackExecutor = callbackExecutor;
         builder.maxPendingCallbacks = maxPendingCallbacks;
+        builder.maxConnections = maxConnections;
+        builder.maxConnectionsPerAddress = maxConnectionsPerAddress;
         builder.writeBufferLowWaterMark = writeBufferLowWaterMark;
         builder.writeBufferHighWaterMark = writeBufferHighWaterMark;
         builder.backpressurePolicy = backpressurePolicy;
@@ -291,6 +305,14 @@ public final class WebSocketServerConfiguration<T> {
         return maxPendingCallbacks;
     }
 
+    public int getMaxConnections() {
+        return maxConnections;
+    }
+
+    public int getMaxConnectionsPerAddress() {
+        return maxConnectionsPerAddress;
+    }
+
     public Integer getWriteBufferLowWaterMark() {
         return writeBufferLowWaterMark;
     }
@@ -361,6 +383,8 @@ public final class WebSocketServerConfiguration<T> {
         private Duration brokerOperationTimeout = Duration.ofSeconds(30);
         private Executor callbackExecutor;
         private int maxPendingCallbacks = 64;
+        private int maxConnections;
+        private int maxConnectionsPerAddress;
         private Integer writeBufferLowWaterMark;
         private Integer writeBufferHighWaterMark;
         private BackpressurePolicy backpressurePolicy = BackpressurePolicy.BUFFER;
@@ -569,6 +593,38 @@ public final class WebSocketServerConfiguration<T> {
                 throw new IllegalArgumentException("Max pending callbacks must be positive!");
             }
             this.maxPendingCallbacks = maxPendingCallbacks;
+            return this;
+        }
+
+        /**
+         * Sets how many connections may be open at once, counted from the TCP accept, before the WebSocket handshake.
+         * A connection past the limit is closed right away, without a response.
+         * Each connection may hold up to the maximum frame size plus the maximum message size of buffered data,
+         * and a few hundred KiB more for the compressor with compression, so size the limit to the memory available.
+         *
+         * @param maxConnections Maximum number of open connections, or 0 for no limit (default).
+         * @return This builder.
+         */
+        public Builder<T> setMaxConnections(int maxConnections) {
+            if (maxConnections < 0) {
+                throw new IllegalArgumentException("Max connections must not be negative!");
+            }
+            this.maxConnections = maxConnections;
+            return this;
+        }
+
+        /**
+         * Sets how many connections one IP address may have open at once, so a single client cannot use up the global
+         * limit. Clients behind one proxy or NAT share the address.
+         *
+         * @param maxConnectionsPerAddress Maximum number of open connections per IP address, or 0 for no limit (default).
+         * @return This builder.
+         */
+        public Builder<T> setMaxConnectionsPerAddress(int maxConnectionsPerAddress) {
+            if (maxConnectionsPerAddress < 0) {
+                throw new IllegalArgumentException("Max connections per address must not be negative!");
+            }
+            this.maxConnectionsPerAddress = maxConnectionsPerAddress;
             return this;
         }
 

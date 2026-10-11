@@ -22,6 +22,7 @@ import pl.mbaracz.jwebsockets.handler.OpenHandler;
 import pl.mbaracz.jwebsockets.handler.UpgradeHandler;
 import pl.mbaracz.jwebsockets.handler.WritabilityHandler;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -37,6 +38,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 /**
@@ -73,6 +75,8 @@ public class WebSocketServer<T, D> {
     private volatile TopicBroker<T> topicBroker = new InMemoryTopicBroker<>();
     private volatile WebSocketServerConfiguration<T> configuration = WebSocketServerConfiguration.<T>builder().build();
     private final SessionRegistry<T, D> sessionRegistry = new SessionRegistry<>();
+    private final AtomicInteger connections = new AtomicInteger();
+    private final Map<InetAddress, Integer> connectionsByAddress = new ConcurrentHashMap<>();
     private final SessionTopicRegistry<T, D> sessionTopicRegistry = new SessionTopicRegistry<>();
     private final TopicMessageHandler<T> topicMessageHandler = this::handleTopicMessage;
     // Read without the lock by publish, changed only under sessionTopicLock
@@ -1020,6 +1024,48 @@ public class WebSocketServer<T, D> {
      */
     WebSocketSession<T, D> getSessionByChannelId(ChannelId id) {
         return sessionRegistry.get(id);
+    }
+
+    /**
+     * Counts a newly accepted connection against the connection limits until it closes.
+     *
+     * @param channel the accepted channel.
+     * @return false if a limit is reached, then the connection is not counted.
+     */
+    boolean acquireConnection(Channel channel) {
+        int max = configuration.getMaxConnections();
+        int maxPerAddress = configuration.getMaxConnectionsPerAddress();
+
+        if (connections.incrementAndGet() > max && max > 0) {
+            connections.decrementAndGet();
+            return false;
+        }
+
+        InetAddress address = maxPerAddress > 0 && channel.remoteAddress() instanceof InetSocketAddress socketAddress
+            ? socketAddress.getAddress()
+            : null;
+        AtomicBoolean accepted = new AtomicBoolean(true);
+
+        if (address != null) {
+            connectionsByAddress.compute(address, (_, count) -> {
+                int current = count == null ? 0 : count;
+                accepted.set(current < maxPerAddress);
+                return accepted.get() ? current + 1 : count;
+            });
+        }
+
+        if (!accepted.get()) {
+            connections.decrementAndGet();
+            return false;
+        }
+
+        channel.closeFuture().addListener(_ -> {
+            connections.decrementAndGet();
+            if (address != null) {
+                connectionsByAddress.computeIfPresent(address, (_, count) -> count == 1 ? null : count - 1);
+            }
+        });
+        return true;
     }
 
     /**

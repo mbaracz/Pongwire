@@ -66,6 +66,12 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
      */
     @Override
     protected void initChannel(Channel channel) {
+        // Before any handler is added, so a connection past the limit costs no pipeline
+        if (!webSocketServer.acquireConnection(channel)) {
+            channel.close();
+            return;
+        }
+
         ChannelPipeline pipeline = channel.pipeline();
 
         WebSocketServerConfiguration<T> configuration = webSocketServer.getConfiguration();

@@ -202,6 +202,12 @@ Exceeding a WebSocket size limit closes the connection with code `1009`. `maxFra
 With compression, `maxFrameSize` limits the compressed size on the wire, and a decompressed frame is limited by
 `maxMessageSize`.
 
+The number of connections is not limited by default. `maxConnections` caps the open connections and
+`maxConnectionsPerAddress` those of one IP address, counted from the TCP accept, and a connection past a limit is
+closed right away.
+Size them to the memory available: a connection may buffer up to `maxFrameSize` plus `maxMessageSize` of direct memory,
+2 MiB with the defaults, and the compressor and decompressor take a few hundred KiB more.
+
 ### Shutdown
 
 `stop()` stops accepting new connections, sends active sessions a `1001` (Going Away) close frame, waits up to
