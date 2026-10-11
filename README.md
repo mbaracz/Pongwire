@@ -178,7 +178,7 @@ reconnect with a random delay.
 
 ### Limits
 
-Upgrade request headers are limited to 8 KiB by default. Frames and complete reassembled messages are limited to 1 MiB.
+Upgrade request headers are limited to 8 KiB by default, and so are the request line and a request body. Frames and complete reassembled messages are limited to 1 MiB.
 
 Exceeding a WebSocket size limit closes the connection with code `1009`. `maxFrameSize` must not exceed
 `maxMessageSize`.

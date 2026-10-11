@@ -453,6 +453,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         if (request.method() != HttpMethod.GET) return false;
         if (request.decoderResult().isFailure()) return false;
 
+        // The opening handshake needs HTTP/1.1 or later and a Host header (RFC 6455, section 4.1)
+        if (request.protocolVersion().compareTo(HttpVersion.HTTP_1_1) < 0) return false;
+        String host = request.headers().get(HttpHeaderNames.HOST);
+        if (host == null || host.isEmpty()) return false;
+
         // Both headers are comma separated token lists compared case-insensitively (RFC 6455, section 4.2.1)
         HttpHeaders headers = request.headers();
         if (!headers.containsValue(HttpHeaderNames.UPGRADE, HttpHeaderValues.WEBSOCKET, true)) return false;
@@ -478,14 +483,21 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     }
 
     /**
-     * Returns the path of the request URI without its query string.
+     * Returns the raw path of the request target without its query string.
+     * Only the origin form is accepted, e.g. {@code /chat?token=1}, and an absolute form like {@code ws://host/chat} is not.
+     * A target like {@code //evil.example/chat} parses with an authority, so it does not match {@code /chat} either.
      *
      * @param request the HTTP request.
-     * @return the request path, or null if the request URI is malformed.
+     * @return the request path, or null if the request target is malformed or not in origin form.
      */
-    private String getRequestPath(FullHttpRequest request) {
+    private static String getRequestPath(FullHttpRequest request) {
+        if (!request.uri().startsWith("/")) {
+            return null;
+        }
+
         try {
-            return URI.create(request.uri()).getRawPath();
+            URI uri = URI.create(request.uri());
+            return uri.getRawAuthority() == null ? uri.getRawPath() : null;
         } catch (IllegalArgumentException ignored) {
             return null;
         }
@@ -710,8 +722,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
         handshaker = wsFactory.newHandshaker(request);
 
-        // Netty leaks its response buffer when a malformed pre-RFC 6455 (Hixie) handshake fails, so those are unsupported too
-        if (handshaker == null || handshaker.version() == WebSocketVersion.V00) {
+        // Only RFC 6455 is supported.
+        // Netty would also accept the drafts 7 and 8, and Hixie handshakes without a version.
+        if (handshaker == null || handshaker.version() != WebSocketVersion.V13) {
             notifyObserver(observer -> observer.handshakeRejected(HttpResponseStatus.UPGRADE_REQUIRED.code()));
             WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(context.channel())
                 .addListener(ChannelFutureListener.CLOSE);

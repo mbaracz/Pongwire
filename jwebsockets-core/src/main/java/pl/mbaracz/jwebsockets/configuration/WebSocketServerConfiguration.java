@@ -389,7 +389,8 @@ public final class WebSocketServerConfiguration<T> {
 
         /**
          * Sets the maximum total size of the HTTP headers in a WebSocket upgrade request.
-         * A request with larger headers is rejected before the WebSocket handshake.
+         * The request line, including the query string, and a request body each have the same limit.
+         * A larger request is rejected before the WebSocket handshake.
          *
          * @param maxHandshakeHeaderSize Maximum total header size in bytes, must be positive.
          * @return This builder.

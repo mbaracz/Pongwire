@@ -40,7 +40,6 @@ import java.security.cert.X509Certificate;
 class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel> {
 
     private static final int COMPRESSION_LEVEL = 6;
-    private static final int MAX_HANDSHAKE_CONTENT_SIZE = 64 * 1024;
 
     private final WebSocketServer<T, D> webSocketServer;
     private final SslContext sslContext;
@@ -79,12 +78,15 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
             pipeline.addLast(sslContext.newHandler(channel.alloc()));
         }
 
+        // The request line has its own limit in Netty, and long query parameters such as tokens count against it
         HttpDecoderConfig httpConfig = new HttpDecoderConfig()
+            .setMaxInitialLineLength(configuration.getMaxHandshakeHeaderSize())
             .setMaxHeaderSize(configuration.getMaxHandshakeHeaderSize());
 
         pipeline.addLast(new HttpServerCodec(httpConfig));
         pipeline.addLast(new ChunkedWriteHandler());
-        pipeline.addLast(new HttpObjectAggregator(MAX_HANDSHAKE_CONTENT_SIZE));
+        // An upgrade request needs no body, so a body is not allowed to take more memory than the headers
+        pipeline.addLast(new HttpObjectAggregator(configuration.getMaxHandshakeHeaderSize()));
 
         if (configuration.isCompressionEnabled()) {
             // Negotiates permessage-deflate during the handshake, then puts the compression encoder and decoder

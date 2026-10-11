@@ -192,6 +192,71 @@ class HandshakeTest {
         assertThat(response.status()).as("Should receive bad request response").isEqualTo(HttpResponseStatus.BAD_REQUEST);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"ws://localhost/chat", "//evil.example/chat", "*"})
+    void shouldRespondWithBadRequestWhenRequestTargetIsNotInOriginForm(String target) {
+        HttpResponse response = sendRequest(Util.createHttpRequest(target));
+
+        assertThat(response.status()).as("Should receive bad request response").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+        assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
+    @Test
+    void shouldRespondWithBadRequestWhenRequestIsHttp10() {
+        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_0, HttpMethod.GET, "/chat");
+        request.headers().set(Util.getDefaultHeaders());
+
+        HttpResponse response = sendRequest(request);
+
+        assertThat(response.status()).as("Should receive bad request response").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void shouldRespondWithBadRequestWhenHostHeaderIsMissing() {
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().remove(HttpHeaderNames.HOST);
+
+        HttpResponse response = sendRequest(request);
+
+        assertThat(response.status()).as("Should receive bad request response").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void shouldRespondWithUpgradeRequiredAndCloseWhenDraftVersionIsRequested() {
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().set(HttpHeaderNames.SEC_WEBSOCKET_VERSION, "8");
+
+        PipelineResult result = sendRequestThroughPipeline(request);
+
+        assertThat(result.response().status()).as("Should require RFC 6455").isEqualTo(HttpResponseStatus.UPGRADE_REQUIRED);
+        assertThat(result.response().headers().get(HttpHeaderNames.SEC_WEBSOCKET_VERSION)).as("Supported version").isEqualTo("13");
+        assertThat(result.channelOpen()).as("Connection should be closed").isFalse();
+        assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
+    @Test
+    void shouldUpgradeConnectionWhenRequestLineIsLongerThanNettyDefaultButWithinMaximumSize() {
+        server.configure(configurer -> configurer.setMaxHandshakeHeaderSize(16 * 1024));
+
+        PipelineResult result = sendRequestThroughPipeline(Util.createHttpRequest("/chat?token=" + "x".repeat(8 * 1024)));
+
+        assertThat(result.response().status()).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
+    }
+
+    @Test
+    void shouldRejectHandshakeWhenBodyExceedsMaximumSize() {
+        server.configure(configurer -> configurer.setMaxHandshakeHeaderSize(1024));
+        FullHttpRequest request = new DefaultFullHttpRequest(
+            HttpVersion.HTTP_1_1, HttpMethod.GET, "/chat", Unpooled.wrappedBuffer(new byte[2048])
+        );
+        request.headers().set(Util.getDefaultHeaders()).setInt(HttpHeaderNames.CONTENT_LENGTH, 2048);
+
+        PipelineResult result = sendRequestThroughPipeline(request);
+
+        assertThat(result.response().status()).as("Should reject the body").isEqualTo(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE);
+        assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
     @Test
     void shouldRespondWithUpgradeRequiredAndCloseWhenHixie75ClientConnects() {
         PipelineResult result = sendRequestThroughPipeline(createLegacyRequest(Unpooled.EMPTY_BUFFER));
