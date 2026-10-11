@@ -4,12 +4,15 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.CodecException;
+import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseDecoder;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.ContinuationWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
@@ -153,7 +156,90 @@ class CompressionTest {
     }
 
     @Test
-    void shouldDeclineOfferWhenClientRequestsServerMaxWindowBits() {
+    void shouldAcceptOfferWhenClientRequestsFullServerWindow() {
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+
+        HttpResponse response = handshake(channel, "permessage-deflate; server_max_window_bits=15");
+
+        assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS))
+            .as("Should accept the offer")
+            .startsWith("permessage-deflate");
+    }
+
+    @Test
+    void shouldDeclineMalformedOfferAndUpgradeWithoutCompression() {
+        List<WebSocketSession<String, Object>> opened = new ArrayList<>();
+        server.onOpen(opened::add);
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+
+        HttpResponse response = handshake(channel, "permessage-deflate; client_max_window_bits=abc");
+
+        assertThat(response.status()).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
+        assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS)).as("Should decline the offer").isNull();
+        assertThat(opened).as("Session should be opened").hasSize(1);
+    }
+
+    @Test
+    void shouldNegotiateOfferFromLaterExtensionsHeader() {
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+        FullHttpRequest request = Util.createHttpRequest("/");
+        request.headers()
+            .add(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS, "x-webkit-deflate-frame")
+            .add(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS, "permessage-deflate");
+        channel.writeInbound(request);
+
+        EmbeddedChannel client = Util.newEmbeddedChannel(new HttpResponseDecoder());
+        ByteBuf buffer;
+        while ((buffer = channel.readOutbound()) != null) {
+            client.writeInbound(buffer);
+        }
+        HttpResponse response = client.readInbound();
+
+        assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS)).as("Should negotiate compression").isEqualTo("permessage-deflate");
+    }
+
+    @Test
+    void shouldCloseConnectionWithProtocolErrorWhenContinuationFrameHasRsv1() {
+        List<String> received = new ArrayList<>();
+        server.onMessage((_, message) -> received.add(message));
+        EmbeddedChannel channel = connectWithCompression(server);
+        ByteBuf compressed = compress("Hello, compressed world");
+        int half = compressed.readableBytes() / 2;
+
+        Util.sendFromClient(
+            channel,
+            new TextWebSocketFrame(false, RSV1, compressed.retainedSlice(0, half)),
+            new ContinuationWebSocketFrame(true, RSV1, compressed.retainedSlice(half, compressed.readableBytes() - half))
+        );
+        compressed.release();
+
+        CloseWebSocketFrame closeFrame = assertThat(Util.readFromServer(channel))
+            .as("Should send a close frame")
+            .asInstanceOf(type(CloseWebSocketFrame.class))
+            .actual();
+        assertThat(closeFrame.statusCode()).as("Close status").isEqualTo(WebSocketCloseStatus.PROTOCOL_ERROR.code());
+        closeFrame.release();
+        assertThat(received).as("Message should not be handled").isEmpty();
+    }
+
+    @Test
+    void shouldCloseConnectionWithProtocolErrorWhenDecompressionFailsWithCodecException() {
+        EmbeddedChannel channel = connectWithCompression(server);
+
+        // The deflate decoder fails like this when the first frame of a message inflates to nothing
+        channel.pipeline().fireExceptionCaught(new DecoderException(new CodecException("cannot read uncompressed buffer")));
+
+        CloseWebSocketFrame closeFrame = assertThat(Util.readFromServer(channel))
+            .as("Should send a close frame")
+            .asInstanceOf(type(CloseWebSocketFrame.class))
+            .actual();
+        assertThat(closeFrame.statusCode()).as("Close status").isEqualTo(WebSocketCloseStatus.PROTOCOL_ERROR.code());
+        closeFrame.release();
+        assertThat(channel.isOpen()).as("Channel should be closed").isFalse();
+    }
+
+    @Test
+    void shouldDeclineOfferWhenClientRequestsServerWindowBelowFullSize() {
         EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
 
         HttpResponse response = handshake(channel, "permessage-deflate; server_max_window_bits=10");

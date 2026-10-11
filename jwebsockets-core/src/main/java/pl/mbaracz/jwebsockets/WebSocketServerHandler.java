@@ -424,11 +424,18 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
         // The frame decoder leaves protocol violations to this handler, also a Close frame with an invalid status code.
         // The close frame then passes OutboundCloseInfoHandler, so onClose reports its status instead of 1006.
-        if (cause instanceof CorruptedWebSocketFrameException violation) {
+        // Other decoding failures of an open session, e.g. of the compression decoder, leave its state broken too.
+        // An application callback throwing such an exception is still a server failure.
+        if (clientFailure && (cause instanceof CorruptedWebSocketFrameException || cause instanceof DecoderException && openedSession != null)) {
             // A close frame sent before, e.g. 1007 by the UTF-8 validator, closes the connection once it is written
             if (!ClosingHandshake.isClosing(context.channel())) {
-                String reason = violation.getMessage() == null ? violation.closeStatus().reasonText() : violation.getMessage();
-                context.writeAndFlush(new CloseWebSocketFrame(violation.closeStatus(), reason))
+                WebSocketCloseStatus status = cause instanceof CorruptedWebSocketFrameException violation
+                    ? violation.closeStatus()
+                    : WebSocketCloseStatus.PROTOCOL_ERROR;
+                String reason = cause instanceof CorruptedWebSocketFrameException && cause.getMessage() != null
+                    ? cause.getMessage()
+                    : status.reasonText();
+                context.writeAndFlush(new CloseWebSocketFrame(status, reason))
                     .addListener(ChannelFutureListener.CLOSE);
             }
 
@@ -445,10 +452,6 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         if (closeStatus != null && openedSession != null && !closeHandled) {
             CloseWebSocketFrame frame = new CloseWebSocketFrame(closeStatus);
             ClosingHandshake.start(context.channel(), frame, webSocketServer.getConfiguration().getCloseTimeout());
-        } else if (cause instanceof DecoderException && openedSession != null) {
-            // Netty closes the connection once its close frame for the protocol violation is written,
-            // closing right away could drop that frame, so only the wait for it is bounded
-            ClosingHandshake.closeAfter(context.channel(), webSocketServer.getConfiguration().getCloseTimeout());
         } else {
             context.close();
         }
@@ -711,8 +714,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                 session.close(status.code(), status.reasonText());
             }
 
-            default ->
-                throw new UnsupportedOperationException("%s frame type is not supported".formatted(frame.getClass().getName()));
+            // A continuation is assembled before this handler, so one arriving here is out of place
+            default -> handleFailure(context, new CorruptedWebSocketFrameException(
+                WebSocketCloseStatus.PROTOCOL_ERROR,
+                "Unexpected " + frame.getClass().getSimpleName()
+            ));
         }
     }
 

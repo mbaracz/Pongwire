@@ -43,8 +43,8 @@ The test server enables `permessage-deflate`, so the compression cases `12.*` an
 
 - `9.*`: limits and performance. These cases are slow and send messages of up to 16 MiB, which exceeds the default
   `maxMessageSize` of 1 MiB.
-- `13.3.*` to `13.6.*`: compression offers with `server_max_window_bits`. The server declines them, because the JDK's
-  zlib compresses only with the full 15-bit window, and Autobahn reports a declined offer as unimplemented.
+- `13.3.*` and `13.5.*`: compression offers with `server_max_window_bits` below 15. The server declines them, because
+  the JDK's zlib compresses only with the full 15-bit window, and Autobahn reports a declined offer as unimplemented.
 
 The container reaches the host server through `host.docker.internal`.
 

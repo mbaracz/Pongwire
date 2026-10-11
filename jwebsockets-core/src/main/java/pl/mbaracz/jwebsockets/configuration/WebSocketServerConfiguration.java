@@ -406,6 +406,7 @@ public final class WebSocketServerConfiguration<T> {
         /**
          * Sets the maximum payload size of a single WebSocket frame.
          * A larger frame closes the connection with status 1009 (message too big).
+         * With compression, it limits the compressed payload, and a decompressed frame is limited by the maximum message size.
          * The configured frame size must not exceed the maximum message size when the configuration is built.
          *
          * @param maxFrameSize Maximum frame payload size in bytes, must be positive.

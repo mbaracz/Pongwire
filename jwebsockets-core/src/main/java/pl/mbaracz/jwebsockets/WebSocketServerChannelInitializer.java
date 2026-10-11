@@ -7,7 +7,9 @@ import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.handler.codec.http.HttpDecoderConfig;
+import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.Utf8FrameValidator;
@@ -15,6 +17,7 @@ import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensionHandler;
+import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensionHandshaker;
 import io.netty.handler.codec.http.websocketx.extensions.compression.PerMessageDeflateServerExtensionHandshaker;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
@@ -30,6 +33,7 @@ import java.security.SecureRandom;
 import java.security.Signature;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.util.List;
 
 /**
  * Channel initializer for setting up the pipeline for WebSocket server channels.
@@ -40,6 +44,7 @@ import java.security.cert.X509Certificate;
 class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel> {
 
     private static final int COMPRESSION_LEVEL = 6;
+    private static final String SERVER_MAX_WINDOW_BITS = "server_max_window_bits";
 
     private final WebSocketServer<T, D> webSocketServer;
     private final SslContext sslContext;
@@ -91,7 +96,8 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
         if (configuration.isCompressionEnabled()) {
             // Negotiates permessage-deflate during the handshake, then puts the compression encoder and decoder
             // in its place, so the handlers below receive decompressed frames
-            pipeline.addLast(new WebSocketServerExtensionHandler(newDeflateHandshaker(configuration.getMaxMessageSize())));
+            pipeline.addLast(new ContinuationRsvValidator());
+            pipeline.addLast(newCompressionHandler(configuration.getMaxMessageSize()));
 
             // The frame decoder lets reserved bits through once extensions are allowed, even if none was negotiated
             pipeline.addLast(new ReservedBitsValidator());
@@ -202,16 +208,63 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
     }
 
     /**
-     * Creates the permessage-deflate handshaker with the default compression level. It accepts server_no_context_takeover,
-     * but declines server_max_window_bits, because the JDK's zlib compresses only with the full 15-bit window.
+     * Creates the handler negotiating permessage-deflate.
+     * An offer with server_max_window_bits is accepted only for the full 15-bit window, the only one the JDK's zlib
+     * compresses with.
+     * A malformed offer, e.g. with a non-numeric client_max_window_bits, is declined (RFC 7692, section 7), so the
+     * connection is upgraded without compression.
+     * Offers spread over several Sec-WebSocket-Extensions headers are read as one (RFC 6455, section 9.1).
      *
      * @param maxMessageSize the maximum size of a decompressed frame.
+     * @return the extension handler.
+     */
+    private static WebSocketServerExtensionHandler newCompressionHandler(int maxMessageSize) {
+        PerMessageDeflateServerExtensionHandshaker withoutWindowBits = newDeflateHandshaker(false, maxMessageSize);
+        PerMessageDeflateServerExtensionHandshaker withWindowBits = newDeflateHandshaker(true, maxMessageSize);
+        String fullWindow = String.valueOf(PerMessageDeflateServerExtensionHandshaker.MAX_WINDOW_SIZE);
+
+        return new WebSocketServerExtensionHandler(
+            declineMalformed(withoutWindowBits),
+            declineMalformed(offer -> fullWindow.equals(offer.parameters().get(SERVER_MAX_WINDOW_BITS))
+                ? withWindowBits.handshakeExtension(offer)
+                : null)
+        ) {
+            @Override
+            protected void onHttpRequestChannelRead(ChannelHandlerContext context, HttpRequest request) throws Exception {
+                List<String> offers = request.headers().getAll(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS);
+
+                if (offers.size() > 1) {
+                    request.headers().set(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS, String.join(", ", offers));
+                }
+                super.onHttpRequestChannelRead(context, request);
+            }
+        };
+    }
+
+    /**
+     * Netty parses the parameters of an offer while negotiating, and its exception would skip the request.
+     */
+    private static WebSocketServerExtensionHandshaker declineMalformed(WebSocketServerExtensionHandshaker handshaker) {
+        return offer -> {
+            try {
+                return handshaker.handshakeExtension(offer);
+            } catch (RuntimeException exception) {
+                return null;
+            }
+        };
+    }
+
+    /**
+     * Creates the permessage-deflate handshaker with the default compression level, accepting server_no_context_takeover.
+     *
+     * @param allowServerWindowSize whether to accept server_max_window_bits.
+     * @param maxMessageSize        the maximum size of a decompressed frame.
      * @return the permessage-deflate handshaker.
      */
-    private static PerMessageDeflateServerExtensionHandshaker newDeflateHandshaker(int maxMessageSize) {
+    private static PerMessageDeflateServerExtensionHandshaker newDeflateHandshaker(boolean allowServerWindowSize, int maxMessageSize) {
         return new PerMessageDeflateServerExtensionHandshaker(
             COMPRESSION_LEVEL,
-            false,
+            allowServerWindowSize,
             PerMessageDeflateServerExtensionHandshaker.MAX_WINDOW_SIZE,
             true,
             false,

@@ -61,7 +61,7 @@ in the [conformance workflow](.github/workflows/conformance.yml).
 | FAILED        |     0 |
 
 The supported test set excludes group 9 cases requiring messages above the default 1 MiB message limit, and cases
-13.3-13.6 requiring `server_max_window_bits`, which the current compression implementation does not support.
+13.3 and 13.5 requiring a `server_max_window_bits` below 15, which the JDK's zlib does not support.
 
 ## JSON and Pub/Sub
 
@@ -181,6 +181,8 @@ reconnect with a random delay.
 Upgrade request headers are limited to 8 KiB by default, and so are the request line and a request body. Frames and complete reassembled messages are limited to 1 MiB.
 
 Exceeding a WebSocket size limit closes the connection with code `1009`. `maxFrameSize` must not exceed
+`maxMessageSize`.
+With compression, `maxFrameSize` limits the compressed size on the wire, and a decompressed frame is limited by
 `maxMessageSize`.
 
 ### Shutdown
