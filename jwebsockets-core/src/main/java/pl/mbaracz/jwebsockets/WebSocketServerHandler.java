@@ -92,6 +92,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
     // Payload of the most recent Ping received while the channel was unwritable, answered once it is writable again
     private ByteBuf deferredPongPayload;
+    private ByteBuf bytesAfterUpgradeRequest;
 
     // Pending close of a connection that has not completed the WebSocket handshake
     private ScheduledFuture<?> handshakeTimeout;
@@ -267,6 +268,12 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             handleHttpRequest(context, (FullHttpRequest) object);
         } else if (object instanceof WebSocketFrame) {
             handleWebSocketFrame(context, (WebSocketFrame) object);
+        } else if (object instanceof ByteBuf bytes && handshaker != null && openedSession == null) {
+            // Frames the client sent in the same read as the upgrade request. Netty passes them on as bytes when it
+            // removes the HTTP codec, behind the WebSocket decoder, so they are decoded once the session is opened.
+            bytesAfterUpgradeRequest = bytesAfterUpgradeRequest == null
+                ? bytes.retain()
+                : Unpooled.wrappedBuffer(bytesAfterUpgradeRequest, bytes.retain());
         }
     }
 
@@ -296,6 +303,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         cancelIdleTimeout();
         cancelUnwritableTimeout();
         releaseDeferredPong();
+
+        if (bytesAfterUpgradeRequest != null) {
+            bytesAfterUpgradeRequest.release();
+            bytesAfterUpgradeRequest = null;
+        }
 
         if (openedSession != null) {
             // Use the status the server closed the connection with, otherwise no close frame
@@ -853,6 +865,13 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                 OpenHandler<T, D> openHandler = webSocketServer.getOpenHandler();
                 if (openHandler != null) {
                     runCallback(context, () -> openHandler.handleOpen(session));
+                }
+
+                if (bytesAfterUpgradeRequest != null) {
+                    ByteBuf bytes = bytesAfterUpgradeRequest;
+                    bytesAfterUpgradeRequest = null;
+                    // Fired from the encoder, the WebSocket decoder is the next inbound handler
+                    context.pipeline().context(WebSocketFrameEncoder.class).fireChannelRead(bytes);
                 }
             } else {
                 // The response could not be written, so the client cannot be answered anymore

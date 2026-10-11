@@ -1,10 +1,12 @@
 package pl.mbaracz.jwebsockets;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.WebSocket13FrameEncoder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -394,6 +396,33 @@ class HandshakeTest {
 
         assertThat(result.response().status()).as("Should reject the handshake").isEqualTo(HttpResponseStatus.BAD_REQUEST);
         assertThat(result.channelOpen()).as("Connection should be closed").isFalse();
+    }
+
+    @Test
+    void shouldHandleFramesSentInSameReadAsUpgradeRequestAfterSessionOpens() {
+        List<String> events = new ArrayList<>();
+        server
+            .onOpen(_ -> events.add("open"))
+            .onMessage((_, message) -> events.add(message));
+        EmbeddedChannel requestEncoder = Util.newEmbeddedChannel(new HttpRequestEncoder());
+        requestEncoder.writeOutbound(Util.createHttpRequest("/chat"));
+        EmbeddedChannel frameEncoder = Util.newEmbeddedChannel(new WebSocket13FrameEncoder(true));
+        frameEncoder.writeOutbound(new TextWebSocketFrame("first"), new TextWebSocketFrame("second"));
+        CompositeByteBuf read = Unpooled.compositeBuffer();
+        ByteBuf buffer;
+
+        while ((buffer = requestEncoder.readOutbound()) != null) {
+            read.addComponent(true, buffer);
+        }
+        while ((buffer = frameEncoder.readOutbound()) != null) {
+            read.addComponent(true, buffer);
+        }
+
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+        channel.writeInbound(read);
+        channel.releaseOutbound();
+
+        assertThat(events).as("Messages should follow the opening of the session").containsExactly("open", "first", "second");
     }
 
     @Test
