@@ -151,6 +151,21 @@ public final class WebSocketServerConfiguration<T> {
     private final boolean compressionEnabled;
 
     /**
+     * The deflate level of compressed messages, from 0 to 9.
+     */
+    private final int compressionLevel;
+
+    /**
+     * Frames smaller than this many bytes are sent uncompressed.
+     */
+    private final int compressionThreshold;
+
+    /**
+     * Whether the server resets its compression context after every message.
+     */
+    private final boolean serverNoContextTakeover;
+
+    /**
      * Message encoder for encoding messages of type T.
      */
     private final MessageEncoder<T> messageEncoder;
@@ -188,6 +203,9 @@ public final class WebSocketServerConfiguration<T> {
         this.allowMissingOrigin = builder.allowMissingOrigin;
         this.subprotocols = builder.subprotocols;
         this.compressionEnabled = builder.compressionEnabled;
+        this.compressionLevel = builder.compressionLevel;
+        this.compressionThreshold = builder.compressionThreshold;
+        this.serverNoContextTakeover = builder.serverNoContextTakeover;
         this.messageEncoder = builder.messageEncoder;
         this.messageDecoder = builder.messageDecoder;
     }
@@ -236,6 +254,9 @@ public final class WebSocketServerConfiguration<T> {
         builder.allowMissingOrigin = allowMissingOrigin;
         builder.subprotocols = subprotocols;
         builder.compressionEnabled = compressionEnabled;
+        builder.compressionLevel = compressionLevel;
+        builder.compressionThreshold = compressionThreshold;
+        builder.serverNoContextTakeover = serverNoContextTakeover;
         builder.messageEncoder = messageEncoder;
         builder.messageDecoder = messageDecoder;
         return builder;
@@ -349,6 +370,18 @@ public final class WebSocketServerConfiguration<T> {
         return compressionEnabled;
     }
 
+    public int getCompressionLevel() {
+        return compressionLevel;
+    }
+
+    public int getCompressionThreshold() {
+        return compressionThreshold;
+    }
+
+    public boolean isServerNoContextTakeover() {
+        return serverNoContextTakeover;
+    }
+
     public MessageEncoder<T> getMessageEncoder() {
         return messageEncoder;
     }
@@ -394,6 +427,9 @@ public final class WebSocketServerConfiguration<T> {
         private boolean allowMissingOrigin;
         private List<String> subprotocols = List.of();
         private boolean compressionEnabled;
+        private int compressionLevel = 6;
+        private int compressionThreshold;
+        private boolean serverNoContextTakeover;
         private MessageEncoder<T> messageEncoder;
         private MessageDecoder<T> messageDecoder;
 
@@ -725,12 +761,60 @@ public final class WebSocketServerConfiguration<T> {
 
         /**
          * Sets whether to negotiate the permessage-deflate compression (RFC 7692) with clients that offer it.
+         * Over TLS, compressed sizes can reveal a secret sent in the same compression context as data an attacker
+         * chooses, like CRIME and BREACH do for HTTPS.
+         * Keep secrets and attacker-controlled content apart, or reset the context with server_no_context_takeover.
+         * With context takeover, a connection keeps about 300 KiB of native zlib memory once it compressed a message.
          *
          * @param compressionEnabled True to compress messages of clients that support it, false otherwise (default).
          * @return This builder.
          */
         public Builder<T> setCompressionEnabled(boolean compressionEnabled) {
             this.compressionEnabled = compressionEnabled;
+            return this;
+        }
+
+        /**
+         * Sets the deflate level of compressed messages.
+         * Level 1 is several times faster than 6 and compresses JSON only a little worse.
+         * Compression runs on the event loop.
+         *
+         * @param compressionLevel Compression level from 0 (none) to 9 (best), 6 by default.
+         * @return This builder.
+         */
+        public Builder<T> setCompressionLevel(int compressionLevel) {
+            if (compressionLevel < 0 || compressionLevel > 9) {
+                throw new IllegalArgumentException("Compression level must be between 0 and 9!");
+            }
+            this.compressionLevel = compressionLevel;
+            return this;
+        }
+
+        /**
+         * Sets the size below which frames are sent uncompressed, where compression saves little and costs CPU.
+         *
+         * @param compressionThreshold Frame payload size in bytes, 0 to compress every frame (default).
+         * @return This builder.
+         */
+        public Builder<T> setCompressionThreshold(int compressionThreshold) {
+            if (compressionThreshold < 0) {
+                throw new IllegalArgumentException("Compression threshold must not be negative!");
+            }
+            this.compressionThreshold = compressionThreshold;
+            return this;
+        }
+
+        /**
+         * Sets whether the server resets its compression context after every message (server_no_context_takeover),
+         * also when the client did not ask for it.
+         * Messages then compress worse, but the compressor's memory is released between messages,
+         * and a message no longer shares a compression context with the ones before it.
+         *
+         * @param serverNoContextTakeover True to reset the context after every message, false otherwise (default).
+         * @return This builder.
+         */
+        public Builder<T> setServerNoContextTakeover(boolean serverNoContextTakeover) {
+            this.serverNoContextTakeover = serverNoContextTakeover;
             return this;
         }
 

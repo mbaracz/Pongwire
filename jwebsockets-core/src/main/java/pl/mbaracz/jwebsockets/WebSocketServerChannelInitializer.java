@@ -16,6 +16,9 @@ import io.netty.handler.codec.http.websocketx.Utf8FrameValidator;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
+import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionData;
+import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionFilter;
+import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionFilterProvider;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensionHandler;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensionHandshaker;
 import io.netty.handler.codec.http.websocketx.extensions.compression.PerMessageDeflateServerExtensionHandshaker;
@@ -33,7 +36,9 @@ import java.security.SecureRandom;
 import java.security.Signature;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Channel initializer for setting up the pipeline for WebSocket server channels.
@@ -43,8 +48,8 @@ import java.util.List;
  */
 class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel> {
 
-    private static final int COMPRESSION_LEVEL = 6;
     private static final String SERVER_MAX_WINDOW_BITS = "server_max_window_bits";
+    private static final String SERVER_NO_CONTEXT_TAKEOVER = "server_no_context_takeover";
 
     private final WebSocketServer<T, D> webSocketServer;
     private final SslContext sslContext;
@@ -103,7 +108,7 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
             // Negotiates permessage-deflate during the handshake, then puts the compression encoder and decoder
             // in its place, so the handlers below receive decompressed frames
             pipeline.addLast(new ContinuationRsvValidator());
-            pipeline.addLast(newCompressionHandler(configuration.getMaxMessageSize()));
+            pipeline.addLast(newCompressionHandler(configuration));
 
             // The frame decoder lets reserved bits through once extensions are allowed, even if none was negotiated
             pipeline.addLast(new ReservedBitsValidator());
@@ -221,18 +226,22 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
      * connection is upgraded without compression.
      * Offers spread over several Sec-WebSocket-Extensions headers are read as one (RFC 6455, section 9.1).
      *
-     * @param maxMessageSize the maximum size of a decompressed frame.
+     * With server_no_context_takeover configured, the server adds it to every offer, which RFC 7692 (section 7.1.1.1)
+     * allows also when the client did not request it.
+     *
+     * @param configuration the server configuration.
      * @return the extension handler.
      */
-    private static WebSocketServerExtensionHandler newCompressionHandler(int maxMessageSize) {
-        PerMessageDeflateServerExtensionHandshaker withoutWindowBits = newDeflateHandshaker(false, maxMessageSize);
-        PerMessageDeflateServerExtensionHandshaker withWindowBits = newDeflateHandshaker(true, maxMessageSize);
+    private static WebSocketServerExtensionHandler newCompressionHandler(WebSocketServerConfiguration<?> configuration) {
+        PerMessageDeflateServerExtensionHandshaker withoutWindowBits = newDeflateHandshaker(false, configuration);
+        PerMessageDeflateServerExtensionHandshaker withWindowBits = newDeflateHandshaker(true, configuration);
         String fullWindow = String.valueOf(PerMessageDeflateServerExtensionHandshaker.MAX_WINDOW_SIZE);
+        boolean serverNoContextTakeover = configuration.isServerNoContextTakeover();
 
         return new WebSocketServerExtensionHandler(
-            declineMalformed(withoutWindowBits),
+            declineMalformed(offer -> withoutWindowBits.handshakeExtension(withServerParameters(offer, serverNoContextTakeover))),
             declineMalformed(offer -> fullWindow.equals(offer.parameters().get(SERVER_MAX_WINDOW_BITS))
-                ? withWindowBits.handshakeExtension(offer)
+                ? withWindowBits.handshakeExtension(withServerParameters(offer, serverNoContextTakeover))
                 : null)
         ) {
             @Override
@@ -245,6 +254,16 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
                 super.onHttpRequestChannelRead(context, request);
             }
         };
+    }
+
+    private static WebSocketExtensionData withServerParameters(WebSocketExtensionData offer, boolean serverNoContextTakeover) {
+        if (!serverNoContextTakeover || offer.parameters().containsKey(SERVER_NO_CONTEXT_TAKEOVER)) {
+            return offer;
+        }
+
+        Map<String, String> parameters = new LinkedHashMap<>(offer.parameters());
+        parameters.put(SERVER_NO_CONTEXT_TAKEOVER, null);
+        return new WebSocketExtensionData(offer.name(), parameters);
     }
 
     /**
@@ -261,20 +280,39 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
     }
 
     /**
-     * Creates the permessage-deflate handshaker with the default compression level, accepting server_no_context_takeover.
+     * Creates the permessage-deflate handshaker with the configured level, accepting server_no_context_takeover.
+     * Frames below the compression threshold are sent uncompressed.
      *
      * @param allowServerWindowSize whether to accept server_max_window_bits.
-     * @param maxMessageSize        the maximum size of a decompressed frame.
+     * @param configuration         the server configuration.
      * @return the permessage-deflate handshaker.
      */
-    private static PerMessageDeflateServerExtensionHandshaker newDeflateHandshaker(boolean allowServerWindowSize, int maxMessageSize) {
+    private static PerMessageDeflateServerExtensionHandshaker newDeflateHandshaker(
+        boolean allowServerWindowSize,
+        WebSocketServerConfiguration<?> configuration
+    ) {
+        int threshold = configuration.getCompressionThreshold();
+        WebSocketExtensionFilter belowThreshold = frame -> frame.content().readableBytes() < threshold;
+        WebSocketExtensionFilterProvider filters = new WebSocketExtensionFilterProvider() {
+            @Override
+            public WebSocketExtensionFilter encoderFilter() {
+                return belowThreshold;
+            }
+
+            @Override
+            public WebSocketExtensionFilter decoderFilter() {
+                return WebSocketExtensionFilter.NEVER_SKIP;
+            }
+        };
+
         return new PerMessageDeflateServerExtensionHandshaker(
-            COMPRESSION_LEVEL,
+            configuration.getCompressionLevel(),
             allowServerWindowSize,
             PerMessageDeflateServerExtensionHandshaker.MAX_WINDOW_SIZE,
             true,
             false,
-            maxMessageSize
+            filters,
+            configuration.getMaxMessageSize()
         );
     }
 }

@@ -32,6 +32,7 @@ import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.InstanceOfAssertFactories.type;
 
 class CompressionTest {
@@ -76,12 +77,19 @@ class CompressionTest {
      * Creates a channel with the server's pipeline and completes a handshake that negotiates compression.
      */
     private static EmbeddedChannel connectWithCompression(WebSocketServer<String, Object> server) {
+        return connectWithExtensions(server, "permessage-deflate");
+    }
+
+    /**
+     * Offers permessage-deflate and checks the extensions the server answered with.
+     */
+    private static EmbeddedChannel connectWithExtensions(WebSocketServer<String, Object> server, String expectedExtensions) {
         EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
         HttpResponse response = handshake(channel, "permessage-deflate");
 
         assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS))
             .as("Should negotiate compression")
-            .isEqualTo("permessage-deflate");
+            .isEqualTo(expectedExtensions);
         return channel;
     }
 
@@ -153,6 +161,40 @@ class CompressionTest {
         assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS))
             .as("Should accept server_no_context_takeover")
             .isEqualTo("permessage-deflate;server_no_context_takeover");
+    }
+
+    @Test
+    void shouldResetServerContextWhenItIsConfiguredAlthoughClientDidNotAsk() {
+        server.configure(configurer -> configurer.setServerNoContextTakeover(true));
+
+        connectWithExtensions(server, "permessage-deflate;server_no_context_takeover");
+    }
+
+    @Test
+    void shouldSendFramesBelowThresholdUncompressed() throws DataFormatException {
+        List<WebSocketSession<String, Object>> opened = new ArrayList<>();
+        server
+            .configure(configurer -> configurer.setCompressionThreshold(10))
+            .onOpen(opened::add);
+        EmbeddedChannel channel = connectWithCompression(server);
+
+        opened.getFirst().sendMessage("short");
+        WebSocketFrame small = assertThat(Util.readFromServer(channel)).asInstanceOf(type(TextWebSocketFrame.class)).actual();
+        assertThat(small.rsv()).as("Small frame should not be compressed").isZero();
+        small.release();
+
+        opened.getFirst().sendMessage("long enough to compress");
+        WebSocketFrame large = assertThat(Util.readFromServer(channel)).asInstanceOf(type(TextWebSocketFrame.class)).actual();
+        assertThat(large.rsv()).as("Large frame should be compressed").isEqualTo(RSV1);
+        assertThat(decompress(large.content())).as("Decompressed message").isEqualTo("long enough to compress");
+        large.release();
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-1, 10})
+    void shouldRejectCompressionLevelOutsideZlibRange(int level) {
+        assertThatThrownBy(() -> server.configure(configurer -> configurer.setCompressionLevel(level)))
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
