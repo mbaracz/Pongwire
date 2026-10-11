@@ -146,12 +146,12 @@ class FailureHandlingTest {
     }
 
     @Test
-    void shouldWaitForNettyCloseFrameWhenProtocolIsViolated() {
+    void shouldWaitForCloseFrameWhenProtocolIsViolated() {
         TestConnection connection = connect(true, _ -> {});
         EmbeddedChannel channel = connection.channel();
         channel.freezeTime();
 
-        // The close frame Netty wrote for the violation is still waiting behind a client that does not read
+        // The close frame for the violation is still waiting behind a client that does not read
         channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
             @Override
             public void flush(ChannelHandlerContext context) {

@@ -1,10 +1,13 @@
 package pl.mbaracz.jwebsockets;
 
+import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
@@ -15,6 +18,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.InstanceOfAssertFactories.type;
 
 class CloseHandlerTest {
 
@@ -64,6 +70,40 @@ class CloseHandlerTest {
         assertThat(outgoingFrame.statusCode()).as("Status code should be the same").isEqualTo(status.code());
         assertThat(latch.await(1, TimeUnit.SECONDS)).as("Did not receive expected message from server").isTrue();
         outgoingFrame.release();
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {999, 1005, 2999, 5000, 65535})
+    void shouldFailConnectionWithProtocolErrorWhenClientSendsInvalidCloseCode(int code) {
+        EmbeddedChannel channel = Util.connect(server);
+
+        Util.sendFromClient(channel, new CloseWebSocketFrame(true, 0, Unpooled.buffer(2).writeShort(code)));
+
+        CloseWebSocketFrame closeFrame = assertThat(Util.readFromServer(channel))
+            .as("Should answer with a close frame")
+            .asInstanceOf(type(CloseWebSocketFrame.class))
+            .actual();
+        assertThat(closeFrame.statusCode()).as("Close status").isEqualTo(WebSocketCloseStatus.PROTOCOL_ERROR.code());
+        closeFrame.release();
+        assertThat(channel.isOpen()).as("Channel should be closed").isFalse();
+        assertThat(closes).as("Close handler should receive the protocol error").singleElement()
+            .extracting(Close::code).isEqualTo(WebSocketCloseStatus.PROTOCOL_ERROR.code());
+    }
+
+    @Test
+    void shouldRejectCloseCodeAboveRfcRange() {
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(Util.connect(server).id());
+
+        assertThatThrownBy(() -> session.close(5000, "")).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void shouldRejectCloseReasonLongerThan123BytesInUtf8() {
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(Util.connect(server).id());
+
+        // 62 two-byte characters are 124 bytes, although the string is shorter than 123 characters
+        assertThatThrownBy(() -> session.close(1000, "ż".repeat(62))).isInstanceOf(IllegalArgumentException.class);
+        assertThatCode(() -> session.close(1000, "x".repeat(123))).doesNotThrowAnyException();
     }
 
     @Test

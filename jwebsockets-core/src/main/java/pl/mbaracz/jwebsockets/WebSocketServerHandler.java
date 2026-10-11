@@ -359,7 +359,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      */
     private void handleFailure(ChannelHandlerContext context, Throwable cause) {
         // A broken connection or bytes Netty could not decode are caused by the client.
-        // Netty already answered protocol violations with a close frame, and a broken connection cannot carry one.
+        // Protocol violations get their own close frame, and a broken connection cannot carry one.
         boolean clientFailure = cause instanceof IOException || cause instanceof DecoderException;
         handleFailure(context, cause, clientFailure, clientFailure ? null : WebSocketCloseStatus.INTERNAL_SERVER_ERROR);
     }
@@ -408,6 +408,21 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             LOGGER.debug("Client failure in channel with id {}: {}", context.channel().id(), cause.toString());
         } else {
             LOGGER.error("Exception caught in channel with id {}", context.channel().id(), cause);
+        }
+
+        // The frame decoder leaves protocol violations to this handler, also a Close frame with an invalid status code.
+        // The close frame then passes OutboundCloseInfoHandler, so onClose reports its status instead of 1006.
+        if (cause instanceof CorruptedWebSocketFrameException violation) {
+            // A close frame sent before, e.g. 1007 by the UTF-8 validator, closes the connection once it is written
+            if (!ClosingHandshake.isClosing(context.channel())) {
+                String reason = violation.getMessage() == null ? violation.closeStatus().reasonText() : violation.getMessage();
+                context.writeAndFlush(new CloseWebSocketFrame(violation.closeStatus(), reason))
+                    .addListener(ChannelFutureListener.CLOSE);
+            }
+
+            // A client that does not read would keep the close frame and the connection pending
+            ClosingHandshake.closeAfter(context.channel(), webSocketServer.getConfiguration().getCloseTimeout());
+            return;
         }
 
         if (!webSocketServer.getConfiguration().isCloseOnException()) {
@@ -550,6 +565,15 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param session    the WebSocket session associated with the frame.
      */
     private void handleCloseFrame(ChannelHandlerContext context, CloseWebSocketFrame closeFrame, WebSocketSession<T, D> session) {
+        // Netty accepts every code from 3000, but RFC 6455 defines them only up to 4999 (section 7.4.2)
+        if (closeFrame.statusCode() > WebSocketSession.MAX_CLOSE_STATUS_CODE) {
+            handleFailure(context, new CorruptedWebSocketFrameException(
+                WebSocketCloseStatus.PROTOCOL_ERROR,
+                "Invalid close status code " + closeFrame.statusCode()
+            ));
+            return;
+        }
+
         if (!ClosingHandshake.markClientStarted(context.channel())) {
             // The server already sent Close, or this client's Close was handled before.
             // The session is reported as closed with the status of the first Close.
@@ -713,11 +737,16 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         // With it, the decoder lets them through for the decompression, and ReservedBitsValidator rejects the rest.
         boolean allowExtensions = configuration.isCompressionEnabled();
 
+        WebSocketDecoderConfig decoderConfig = WebSocketDecoderConfig.newBuilder()
+            .allowExtensions(allowExtensions)
+            .maxFramePayloadLength(configuration.getMaxFrameSize())
+            .closeOnProtocolViolation(false)
+            .build();
+
         WebSocketServerHandshakerFactory wsFactory = new WebSocketServerHandshakerFactory(
             getWebSocketLocation(request),
             subprotocols,
-            allowExtensions,
-            configuration.getMaxFrameSize()
+            decoderConfig
         );
 
         handshaker = wsFactory.newHandshaker(request);

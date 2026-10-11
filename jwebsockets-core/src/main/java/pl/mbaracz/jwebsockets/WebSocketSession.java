@@ -4,6 +4,7 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
@@ -21,6 +22,9 @@ import java.util.function.Supplier;
  * @param <D> The type of the session context.
  */
 public class WebSocketSession<T, D> {
+
+    static final int MAX_CLOSE_STATUS_CODE = 4999;
+    private static final int MAX_CLOSE_REASON_LENGTH = 123;
 
     private final BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender;
     private final Function<T, byte[]> encoder;
@@ -179,9 +183,20 @@ public class WebSocketSession<T, D> {
      * @return A stage that completes once the session was removed from the server and the close handler was called,
      * or queued on the callback executor. It usually completes on the event loop, so use the async methods of the
      * stage for blocking continuations.
-     * @throws IllegalArgumentException If the code is not a valid close status code.
+     * @throws IllegalArgumentException If the code is not a valid close status code,
+     *                                  or the reason is longer than 123 bytes in UTF-8.
      */
     public CompletionStage<Void> close(int code, String reason) {
+        // Netty accepts every code from 3000, but RFC 6455 defines them only up to 4999 (section 7.4.2)
+        if (code > MAX_CLOSE_STATUS_CODE) {
+            throw new IllegalArgumentException("Invalid close status code: " + code);
+        }
+
+        // A control frame carries at most 125 bytes, two of them the code (RFC 6455, section 5.5)
+        if (reason != null && reason.getBytes(StandardCharsets.UTF_8).length > MAX_CLOSE_REASON_LENGTH) {
+            throw new IllegalArgumentException("Close reason must not be longer than 123 bytes in UTF-8");
+        }
+
         CloseWebSocketFrame closeFrame = new CloseWebSocketFrame(code, reason);
         ClosingHandshake.start(channelContext.channel(), closeFrame, closeTimeout);
 
