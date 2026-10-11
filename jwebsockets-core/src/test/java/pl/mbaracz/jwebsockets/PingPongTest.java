@@ -4,12 +4,15 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocket13FrameDecoder;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -157,6 +160,35 @@ class PingPongTest {
         assertThat(flushes.get()).as("Should flush once per read").isEqualTo(1);
         assertThat(frames).as("Should answer every Ping").hasSize(3).allMatch(PongWebSocketFrame.class::isInstance);
         frames.forEach(WebSocketFrame::release);
+    }
+
+    @Test
+    void shouldNotAnswerPingWhenCloseFrameWasSentInSameRead() {
+        // Autobahn 3.2: with compression enabled, the reserved bits validator closes the connection
+        server.configure(configurer -> configurer.setCompressionEnabled(true));
+        EmbeddedChannel channel = Util.connect(server);
+
+        // A socket writes both frames at once, while this channel would fail the Pong once the close frame closed it
+        List<ByteBuf> written = new ArrayList<>();
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void write(ChannelHandlerContext context, Object message, ChannelPromise promise) {
+                written.add(((ByteBuf) message).retainedDuplicate());
+                context.write(message, promise);
+            }
+        });
+
+        Util.sendFromClient(
+            channel,
+            new TextWebSocketFrame(true, 0b010, Unpooled.copiedBuffer("Hello", StandardCharsets.UTF_8)),
+            new PingWebSocketFrame()
+        );
+
+        assertThat(written).as("Only the close frame should be written").hasSize(1);
+        EmbeddedChannel client = new EmbeddedChannel(new WebSocket13FrameDecoder(false, true, 65536));
+        client.writeInbound(written.getFirst());
+        assertThat(client.<Object>readInbound()).as("Written frame").isInstanceOf(CloseWebSocketFrame.class).satisfies(ReferenceCountUtil::release);
+        client.finishAndReleaseAll();
     }
 
     @Test

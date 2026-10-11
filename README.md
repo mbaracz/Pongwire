@@ -55,7 +55,7 @@ in the [conformance workflow](.github/workflows/conformance.yml).
 
 | Result        | Cases |
 |---------------|------:|
-| OK            |   386 |
+| OK            |   422 |
 | NON-STRICT    |     2 |
 | INFORMATIONAL |     3 |
 | FAILED        |     0 |
