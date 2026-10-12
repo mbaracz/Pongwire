@@ -1,6 +1,6 @@
 # Security
 
-jwebsockets is currently under development and has not reached its first stable release.
+Pongwire is currently under development and has not reached its first stable release.
 
 ## Reporting a vulnerability
 

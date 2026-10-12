@@ -1,4 +1,4 @@
-# jwebsockets
+# Pongwire
 
 Tiny production-ready WebSocket server for Java, powered by Netty.
 
@@ -10,7 +10,7 @@ Add the core dependency to your project:
 
 <dependency>
     <groupId>pl.mbaracz</groupId>
-    <artifactId>jwebsockets-core</artifactId>
+    <artifactId>pongwire-core</artifactId>
     <version>1.0-SNAPSHOT</version>
 </dependency>
 ```
@@ -37,7 +37,7 @@ ws://localhost:8080/chat
 
 That's it. No framework, container or application server required.
 
-## Why jwebsockets?
+## Why Pongwire?
 
 - Netty-based
 - Typed messages and session context
@@ -50,7 +50,7 @@ That's it. No framework, container or application server required.
 
 ## Conformance
 
-jwebsockets is tested with the [Autobahn WebSocket Testsuite](https://github.com/crossbario/autobahn-testsuite)
+Pongwire is tested with the [Autobahn WebSocket Testsuite](https://github.com/crossbario/autobahn-testsuite)
 in the [conformance workflow](.github/workflows/conformance.yml).
 
 | Result        | Cases |
@@ -71,7 +71,7 @@ For JSON support, add the Jackson extension:
 
 <dependency>
     <groupId>pl.mbaracz</groupId>
-    <artifactId>jwebsockets-jackson</artifactId>
+    <artifactId>pongwire-jackson</artifactId>
     <version>1.0-SNAPSHOT</version>
 </dependency>
 ```
@@ -237,4 +237,4 @@ the event loops.
 
 ## License
 
-jwebsockets is licensed under the [Apache License 2.0](LICENSE).
+Pongwire is licensed under the [Apache License 2.0](LICENSE).

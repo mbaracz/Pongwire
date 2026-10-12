@@ -28,9 +28,9 @@ jobs:
 
       - name: Start test server
         run: |
-          mvn --batch-mode -pl jwebsockets-core \
+          mvn --batch-mode -pl pongwire-core \
             org.codehaus.mojo:exec-maven-plugin:3.6.4:java \
-            -Dexec.mainClass=pl.mbaracz.jwebsockets.AutobahnTestServer \
+            -Dexec.mainClass=pl.mbaracz.pongwire.AutobahnTestServer \
             -Dexec.classpathScope=test \
             > autobahn-server.log 2>&1 &
 

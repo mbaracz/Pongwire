@@ -1,7 +1,7 @@
 {
   "servers": [
     {
-      "agent": "jwebsockets",
+      "agent": "pongwire",
       "url": "ws://host.docker.internal:9001/"
     }
   ],

@@ -5,16 +5,16 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>pl.mbaracz</groupId>
-    <artifactId>jwebsockets</artifactId>
+    <artifactId>pongwire</artifactId>
     <version>1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
     <modules>
-        <module>jwebsockets-core</module>
-        <module>jwebsockets-jackson</module>
-        <module>jwebsockets-micrometer</module>
-        <module>jwebsockets-benchmarks</module>
-        <module>jwebsockets-example</module>
+        <module>pongwire-core</module>
+        <module>pongwire-jackson</module>
+        <module>pongwire-micrometer</module>
+        <module>pongwire-benchmarks</module>
+        <module>pongwire-example</module>
     </modules>
 
     <properties>
@@ -49,7 +49,7 @@
 
             <dependency>
                 <groupId>pl.mbaracz</groupId>
-                <artifactId>jwebsockets-core</artifactId>
+                <artifactId>pongwire-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
