@@ -221,6 +221,58 @@ class CompressionTest {
         assertThat(opened).as("Session should be opened").hasSize(1);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {";", "permessage-deflate;", "permessage-deflate; =15", "permessage-deflate; client_max_window_bits=",
+        "permessage-deflate; client_max_window_bits=\"15", "permessage-deflate; client_max_window_bits=1\"5"})
+    void shouldRejectHandshakeWhenExtensionHeaderIsMalformed(String header) {
+        List<Throwable> failures = new ArrayList<>();
+        List<Integer> rejections = new ArrayList<>();
+        server.onError((_, failure) -> failures.add(failure)).observer(new WebSocketServerObserver<>() {
+            @Override
+            public void handshakeRejected(int status) {
+                rejections.add(status);
+            }
+        });
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+
+        // Netty would split the first header into no parts at all and fail on the missing name
+        HttpResponse response = handshake(channel, header);
+
+        assertThat(response.status()).as("Should reject the handshake").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+        assertThat(rejections).as("Observer should see the rejection").containsExactly(400);
+        assertThat(failures).as("No failure should be reported").isEmpty();
+        assertThat(channel.isOpen()).as("Connection should be closed").isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "permessage-deflate; client_max_window_bits=15; client_max_window_bits=15",
+        "permessage-deflate; client_max_window_bits=8; CLIENT_MAX_WINDOW_BITS=15",
+        "permessage-deflate; server_no_context_takeover=garbage",
+        "permessage-deflate; SERVER_NO_CONTEXT_TAKEOVER=garbage",
+        "permessage-deflate; client_max_window_bits=+15",
+        "permessage-deflate; CLIENT_MAX_WINDOW_BITS=+15"
+    })
+    void shouldDeclineOfferNettyWouldAcceptDespiteInvalidParameters(String offer) {
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+
+        HttpResponse response = handshake(channel, offer);
+
+        assertThat(response.status()).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
+        assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS)).as("Should decline the offer").isNull();
+    }
+
+    @Test
+    void shouldNegotiateWellFormedOfferListedAfterMalformedOne() {
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+
+        HttpResponse response = handshake(channel, "permessage-deflate; client_max_window_bits=+15, , permessage-deflate; client_max_window_bits=\"15\"");
+
+        assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS))
+            .as("Should negotiate the well-formed offer")
+            .isEqualTo("permessage-deflate");
+    }
+
     @Test
     void shouldNegotiateOfferFromLaterExtensionsHeader() {
         EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));

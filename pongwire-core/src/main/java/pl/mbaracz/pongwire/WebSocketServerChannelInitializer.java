@@ -7,6 +7,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.WriteBufferWaterMark;
+import io.netty.handler.codec.DecoderResult;
 import io.netty.handler.codec.http.HttpDecoderConfig;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpObjectAggregator;
@@ -41,11 +42,16 @@ import java.security.SecureRandom;
 import java.security.Signature;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 /**
  * Channel initializer for setting up the pipeline for WebSocket server channels.
@@ -57,6 +63,7 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
 
     private static final String SERVER_MAX_WINDOW_BITS = "server_max_window_bits";
     private static final String SERVER_NO_CONTEXT_TAKEOVER = "server_no_context_takeover";
+    private static final Pattern WINDOW_BITS = Pattern.compile("8|9|1[0-5]");
 
     private final WebSocketServer<T, D> webSocketServer;
     private final SslContext sslContext;
@@ -323,8 +330,19 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
             protected void onHttpRequestChannelRead(ChannelHandlerContext context, HttpRequest request) throws Exception {
                 List<String> offers = request.headers().getAll(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS);
 
-                if (offers.size() > 1) {
-                    request.headers().set(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS, String.join(", ", offers));
+                if (!offers.isEmpty()) {
+                    request.headers().remove(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS);
+
+                    try {
+                        String wellFormed = wellFormedOffers(String.join(", ", offers));
+
+                        if (wellFormed != null) {
+                            request.headers().set(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS, wellFormed);
+                        }
+                    } catch (IllegalArgumentException exception) {
+                        // The server handler answers a request that failed decoding with 400
+                        request.setDecoderResult(DecoderResult.failure(exception));
+                    }
                 }
                 super.onHttpRequestChannelRead(context, request);
             }
@@ -352,6 +370,69 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
                 return null;
             }
         };
+    }
+
+    /**
+     * Keeps only the offers Netty parses correctly.
+     * Netty fails on an offer without a name, e.g. a header holding only a semicolon, before any handshaker sees it.
+     * It also keeps the last of repeated parameters, accepts a value on the no-context-takeover flags
+     * and parses window bits with a sign, all of which RFC 7692 (section 7) tells the server to decline.
+     *
+     * @param header the joined Sec-WebSocket-Extensions header.
+     * @return the well-formed offers, or null if there is none.
+     * @throws IllegalArgumentException if the header violates the grammar of RFC 6455 (section 9.1), e.g. an offer
+     *                                  without a name, an empty parameter or an unbalanced quote.
+     */
+    static String wellFormedOffers(String header) {
+        List<String> offers = new ArrayList<>();
+
+        // Empty list elements are ignored like in any HTTP list (RFC 9110, section 5.6.1)
+        for (String offer : header.split(",")) {
+            if (!offer.isBlank() && hasValidParameters(offer)) {
+                offers.add(offer.trim());
+            }
+        }
+        return offers.isEmpty() ? null : String.join(", ", offers);
+    }
+
+    private static boolean hasValidParameters(String offer) {
+        String[] parts = offer.split(";", -1);
+
+        if (parts[0].isBlank()) {
+            throw new IllegalArgumentException("Extension offer without a name: " + offer);
+        }
+
+        Set<String> names = new HashSet<>();
+
+        for (int i = 1; i < parts.length; i++) {
+            String[] parameter = parts[i].trim().split("=", 2);
+            String name = parameter[0].trim().toLowerCase(Locale.ROOT);
+            String value = parameter.length == 1 ? null : unquote(parameter[1].trim());
+
+            if (name.isEmpty() || value != null && value.isEmpty()) {
+                throw new IllegalArgumentException("Malformed extension parameter: " + parts[i]);
+            }
+            if (!names.add(name)) {
+                return false;
+            }
+            if (name.endsWith("_no_context_takeover") && value != null) {
+                return false;
+            }
+            if (name.endsWith("_max_window_bits") && (value != null || name.startsWith("server")) && !WINDOW_BITS.matcher(String.valueOf(value)).matches()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String unquote(String value) {
+        boolean quoted = value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"");
+        String content = quoted ? value.substring(1, value.length() - 1) : value;
+
+        if (content.indexOf('"') >= 0) {
+            throw new IllegalArgumentException("Malformed extension parameter value: " + value);
+        }
+        return content;
     }
 
     /**
