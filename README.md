@@ -98,6 +98,11 @@ server.onMessage((session, message) ->
 );
 ```
 
+The JSON decoder accepts a single UTF-8 encoded value and rejects `null`, trailing content and other encodings. Without
+a mapper, the codecs use Jackson's defaults with java.time support. A mapper passed to the decoder handles input from
+clients, so it must not enable polymorphic typing, e.g. `activateDefaultTyping`, which lets a client choose the classes
+the server instantiates.
+
 The stages returned by `publish`, `subscribe` and `unsubscribe` are the only place where topic broker failures are
 reported, so handle them.
 

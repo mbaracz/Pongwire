@@ -9,9 +9,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import pl.mbaracz.jwebsockets.message.impl.json.JsonMessageDecoder;
+import pl.mbaracz.jwebsockets.message.impl.json.JsonMessageEncoder;
 
 import java.io.IOException;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -52,6 +58,40 @@ public class JsonMessageDecoderTest {
                 MessageDecodeException.class,
                 exception -> assertThat(exception.getPayload()).isEqualTo(emptyJson.getBytes())
             );
+    }
+
+    @Test
+    void shouldRejectJsonNull() {
+        assertThatThrownBy(() -> decoder.decode("null".getBytes(StandardCharsets.UTF_8)))
+            .isInstanceOf(MessageDecodeException.class)
+            .hasMessageContaining("null");
+    }
+
+    @Test
+    void shouldRejectContentAfterTheFirstValue() {
+        byte[] twoValues = "{\"text\":\"a\",\"number\":1}{\"text\":\"b\",\"number\":2}".getBytes(StandardCharsets.UTF_8);
+
+        assertThatThrownBy(() -> decoder.decode(twoValues)).isInstanceOf(MessageDecodeException.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"UTF-16BE", "UTF-16LE", "UTF-16", "UTF-32BE"})
+    void shouldRejectJsonNotEncodedInUtf8(String charset) {
+        byte[] json = "{\"text\":\"a\",\"number\":1}".getBytes(Charset.forName(charset));
+
+        assertThatThrownBy(() -> decoder.decode(json))
+            .isInstanceOf(MessageDecodeException.class)
+            .hasMessageContaining("UTF-8");
+    }
+
+    @Test
+    void shouldDecodeJavaTimeTypesWithDefaultMapper() {
+        JsonMessageDecoder<Instant> instantDecoder = new JsonMessageDecoder<>(Instant.class);
+        Instant now = Instant.parse("2026-10-12T10:15:30Z");
+
+        byte[] encoded = new JsonMessageEncoder<Instant>().encode(now);
+
+        assertThat(instantDecoder.decode(encoded)).isEqualTo(now);
     }
 
     @Test

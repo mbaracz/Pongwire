@@ -11,10 +11,10 @@ public class JsonMessageEncoder<T> implements MessageEncoder<T> {
     private final ObjectMapper mapper;
 
     /**
-     * Creates an encoder with a default {@link ObjectMapper}.
+     * Creates an encoder with a default {@link ObjectMapper}, which also handles java.time types.
      */
     public JsonMessageEncoder() {
-        this(new ObjectMapper());
+        this(DefaultObjectMapper.create());
     }
 
     /**
