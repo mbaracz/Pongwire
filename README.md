@@ -193,6 +193,14 @@ reconnect with a random delay.
 
 `unwritableTimeout` can close connections that stay unwritable for too long. It is disabled by default.
 
+With the defaults, `BUFFER` and no `unwritableTimeout`, nothing limits the outbound buffer of a client that stops
+reading. Every broadcast or topic message adds to it until the server runs out of memory, so a public server should set
+`unwritableTimeout`, or use `REJECT_NEW`.
+
+A message larger than the high write buffer watermark (64 KiB by default) makes the connection unwritable on its own.
+Under `REJECT_NEW` the next send then fails although the client reads fine, so set the high watermark with
+`setWriteBufferWaterMark` above the largest message the server sends.
+
 ### Limits
 
 Upgrade request headers are limited to 8 KiB by default, and so are the request line and a request body. Frames and complete reassembled messages are limited to 1 MiB.

@@ -507,7 +507,8 @@ public final class WebSocketServerConfiguration<T> {
         /**
          * Sets the maximum size of a complete WebSocket message, including all fragments.
          * A larger message closes the connection with status 1009 (message too big).
-         * The configured message size must not be smaller than the maximum frame size when the configuration is built.
+         * The configured message size must not be smaller than the maximum frame size when the configuration is built,
+         * so lowering it below the default 1 MiB needs a lower maximum frame size too.
          *
          * @param maxMessageSize Maximum message size in bytes, must be positive.
          * @return This builder.
@@ -554,6 +555,7 @@ public final class WebSocketServerConfiguration<T> {
 
         /**
          * Sets how long to wait for the pong after a heartbeat ping before the session is closed.
+         * It has no effect until a heartbeat interval is set.
          *
          * @param heartbeatTimeout Heartbeat timeout, positive, 10 seconds by default.
          * @return This builder.
@@ -696,6 +698,9 @@ public final class WebSocketServerConfiguration<T> {
         /**
          * Sets the write buffer watermarks of the connections. A connection becomes unwritable when more than the high
          * watermark waits to be written, and writable again once less than the low watermark is left.
+         * Netty's defaults are 32 KiB and 64 KiB.
+         * A message larger than the high watermark makes the connection unwritable until most of it is sent,
+         * which reports a writability change for each such message and fails the next send under REJECT_NEW.
          *
          * @param low  Low watermark in bytes.
          * @param high High watermark in bytes, at least the low watermark.
@@ -718,6 +723,10 @@ public final class WebSocketServerConfiguration<T> {
          * {@link BackpressurePolicy#BUFFER} keeps accepting them into Netty's outbound buffer and is the default.
          * {@link BackpressurePolicy#REJECT_NEW} rejects them until the connection becomes writable again.
          * In both cases, a configured unwritable timeout still closes a connection that remains unwritable.
+         * Without an unwritable timeout, the buffer of a client that stops reading grows without a limit under BUFFER,
+         * e.g. with every broadcast, until the server runs out of memory.
+         * Under REJECT_NEW, a single message larger than the high watermark makes the connection unwritable at once,
+         * so the next send fails although the client reads fine. Set the high watermark above the largest message.
          *
          * @param backpressurePolicy Backpressure policy, not null.
          * @return This builder.
@@ -730,6 +739,7 @@ public final class WebSocketServerConfiguration<T> {
         /**
          * Sets how long the write buffer of an unwritable connection may not drain, for example because the client stopped
          * reading, before the connection is closed. A client that reads a large message slowly keeps its connection.
+         * Under the default BUFFER policy, this timeout is what bounds the buffer of a client that stopped reading.
          *
          * @param unwritableTimeout Unwritable timeout, positive, or null to keep unwritable connections open (default).
          * @return This builder.
@@ -896,6 +906,8 @@ public final class WebSocketServerConfiguration<T> {
 
         /**
          * Sets whether text frames are allowed.
+         * A frame of a type that is not allowed closes the connection with status 1003 (unsupported data),
+         * so a server allowing neither text nor binary frames closes every connection that sends a message.
          *
          * @param allowTextFrames True to allow text frames, false otherwise.
          * @return This builder.
