@@ -29,7 +29,6 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
-import io.netty.handler.stream.ChunkedWriteHandler;
 import pl.mbaracz.jwebsockets.configuration.WebSocketServerConfiguration;
 
 import javax.net.ssl.SSLException;
@@ -128,7 +127,6 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
             .setMaxHeaderSize(configuration.getMaxHandshakeHeaderSize());
 
         pipeline.addLast(new HttpServerCodec(httpConfig));
-        pipeline.addLast(new ChunkedWriteHandler());
         // An upgrade request needs no body, so a body is not allowed to take more memory than the headers
         pipeline.addLast(new HttpObjectAggregator(configuration.getMaxHandshakeHeaderSize()));
 
