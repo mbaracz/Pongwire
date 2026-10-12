@@ -107,6 +107,11 @@ public final class WebSocketServerConfiguration<T> {
     private final int maxConnectionsPerAddress;
 
     /**
+     * TLS handshakes the server runs at once, 0 for no limit.
+     */
+    private final int maxConcurrentTlsHandshakes;
+
+    /**
      * Low write buffer watermark in bytes, or null to use the Netty default.
      */
     private final Integer writeBufferLowWaterMark;
@@ -194,6 +199,7 @@ public final class WebSocketServerConfiguration<T> {
         this.maxPendingCallbacks = builder.maxPendingCallbacks;
         this.maxConnections = builder.maxConnections;
         this.maxConnectionsPerAddress = builder.maxConnectionsPerAddress;
+        this.maxConcurrentTlsHandshakes = builder.maxConcurrentTlsHandshakes;
         this.writeBufferLowWaterMark = builder.writeBufferLowWaterMark;
         this.writeBufferHighWaterMark = builder.writeBufferHighWaterMark;
         this.backpressurePolicy = builder.backpressurePolicy;
@@ -245,6 +251,7 @@ public final class WebSocketServerConfiguration<T> {
         builder.maxPendingCallbacks = maxPendingCallbacks;
         builder.maxConnections = maxConnections;
         builder.maxConnectionsPerAddress = maxConnectionsPerAddress;
+        builder.maxConcurrentTlsHandshakes = maxConcurrentTlsHandshakes;
         builder.writeBufferLowWaterMark = writeBufferLowWaterMark;
         builder.writeBufferHighWaterMark = writeBufferHighWaterMark;
         builder.backpressurePolicy = backpressurePolicy;
@@ -334,6 +341,10 @@ public final class WebSocketServerConfiguration<T> {
         return maxConnectionsPerAddress;
     }
 
+    public int getMaxConcurrentTlsHandshakes() {
+        return maxConcurrentTlsHandshakes;
+    }
+
     public Integer getWriteBufferLowWaterMark() {
         return writeBufferLowWaterMark;
     }
@@ -418,6 +429,7 @@ public final class WebSocketServerConfiguration<T> {
         private int maxPendingCallbacks = 64;
         private int maxConnections;
         private int maxConnectionsPerAddress;
+        private int maxConcurrentTlsHandshakes;
         private Integer writeBufferLowWaterMark;
         private Integer writeBufferHighWaterMark;
         private BackpressurePolicy backpressurePolicy = BackpressurePolicy.BUFFER;
@@ -661,6 +673,23 @@ public final class WebSocketServerConfiguration<T> {
                 throw new IllegalArgumentException("Max connections per address must not be negative!");
             }
             this.maxConnectionsPerAddress = maxConnectionsPerAddress;
+            return this;
+        }
+
+        /**
+         * Sets how many TLS handshakes may run at once. A connection past the limit is closed right away.
+         * TLS handshakes are expensive, and when all clients reconnect at once they slow each other down until most
+         * of them miss the handshake timeout, so turning the excess away early lets the others finish.
+         * Clients should reconnect with a random delay.
+         *
+         * @param maxConcurrentTlsHandshakes Maximum number of TLS handshakes in progress, or 0 for no limit (default).
+         * @return This builder.
+         */
+        public Builder<T> setMaxConcurrentTlsHandshakes(int maxConcurrentTlsHandshakes) {
+            if (maxConcurrentTlsHandshakes < 0) {
+                throw new IllegalArgumentException("Max concurrent TLS handshakes must not be negative!");
+            }
+            this.maxConcurrentTlsHandshakes = maxConcurrentTlsHandshakes;
             return this;
         }
 

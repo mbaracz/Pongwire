@@ -18,6 +18,7 @@ import io.netty.handler.codec.http.cookie.Cookie;
 import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
 import io.netty.handler.codec.http.websocketx.*;
 import io.netty.handler.flush.FlushConsolidationHandler;
+import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
 import org.slf4j.Logger;
@@ -33,6 +34,8 @@ import pl.mbaracz.jwebsockets.handler.UpgradeResult;
 import pl.mbaracz.jwebsockets.handler.WritabilityHandler;
 import pl.mbaracz.jwebsockets.message.MessageDecodeException;
 import pl.mbaracz.jwebsockets.message.MessageDecoder;
+
+import javax.net.ssl.SSLSession;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -926,7 +929,10 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         SocketAddress address = context.channel().remoteAddress();
         InetSocketAddress remoteAddress = address instanceof InetSocketAddress inetAddress ? inetAddress : null;
 
-        return new UpgradeRequest(query.path(), query.parameters(), cookies, headers, remoteAddress);
+        SslHandler sslHandler = context.pipeline().get(SslHandler.class);
+        SSLSession sslSession = sslHandler == null ? null : sslHandler.engine().getSession();
+
+        return new UpgradeRequest(query.path(), query.parameters(), cookies, headers, remoteAddress, sslSession);
     }
 
     private HttpResponse createHttpResponse(UpgradeResponse upgradeResponse) {

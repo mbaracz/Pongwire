@@ -152,7 +152,7 @@ class UpgradeHandlerTest {
     @Test
     void shouldExposeRemoteAddress() {
         InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 12345);
-        UpgradeRequest request = new UpgradeRequest("/", Map.of(), Map.of(), Map.of(), remoteAddress);
+        UpgradeRequest request = new UpgradeRequest("/", Map.of(), Map.of(), Map.of(), remoteAddress, null);
 
         assertThat(request.getRemoteAddress()).isSameAs(remoteAddress);
     }

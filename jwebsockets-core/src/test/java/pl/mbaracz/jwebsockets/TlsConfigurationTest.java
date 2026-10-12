@@ -27,7 +27,7 @@ class TlsConfigurationTest {
 
     @Test
     void shouldCreateConfigurationForEncryptedPemPrivateKey() {
-        TlsConfiguration configuration = TlsConfiguration.forPem(CERTIFICATE_CHAIN, PRIVATE_KEY, "secret");
+        TlsConfiguration configuration = TlsConfiguration.forPem(CERTIFICATE_CHAIN, PRIVATE_KEY, "secret".toCharArray());
 
         assertThat(configuration.certificateChain()).isEqualTo(CERTIFICATE_CHAIN);
         assertThat(configuration.privateKey()).isEqualTo(PRIVATE_KEY);

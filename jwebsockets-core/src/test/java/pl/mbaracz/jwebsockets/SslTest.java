@@ -10,23 +10,32 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import pl.mbaracz.jwebsockets.handler.UpgradeResult;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.jwebsockets.message.impl.plain.PlainTextMessageEncoder;
 
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLHandshakeException;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.TrustManagerFactory;
 
+import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.security.KeyStore;
 import java.security.Security;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -77,7 +86,8 @@ class SslTest {
             webSocket.abort();
         }
         if (client != null) {
-            client.close();
+            // close() would wait for a connection a failing test left open
+            client.shutdownNow();
         }
         if (server != null && server.isRunning()) {
             server.stop();
@@ -179,6 +189,65 @@ class SslTest {
     }
 
     @Test
+    void shouldPassClientCertificateToUpgradeHandlerWhenContextRequiresClientAuthentication() throws Exception {
+        SelfSignedCertificate clientCertificate = new SelfSignedCertificate("client");
+        try {
+            AtomicReference<String> clientSubject = new AtomicReference<>();
+            server = newServer(TlsConfiguration.forSslContext(createSslContext(certificate, clientCertificate), requireClientAuth()))
+                .onUpgrade((request, _) -> {
+                    try {
+                        X509Certificate peer = (X509Certificate) request.getSslSession().getPeerCertificates()[0];
+                        clientSubject.set(peer.getSubjectX500Principal().getName());
+                    } catch (SSLPeerUnverifiedException exception) {
+                        clientSubject.set("unverified");
+                    }
+                    return UpgradeResult.accept(null);
+                })
+                .listen(0);
+
+            client = newClient(createClientSslContext(certificate, clientCertificate));
+            webSocket = client.newWebSocketBuilder()
+                .connectTimeout(CLIENT_TIMEOUT)
+                .buildAsync(serverUri(), new WebSocket.Listener() {})
+                .get(CALLBACK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+            assertThat(clientSubject).as("Client certificate subject").hasValue("CN=client");
+        } finally {
+            clientCertificate.delete();
+        }
+    }
+
+    @Test
+    void shouldRejectClientWithoutCertificateWhenContextRequiresClientAuthentication() throws Exception {
+        server = newServer(TlsConfiguration.forSslContext(createSslContext(certificate, certificate), requireClientAuth())).listen(0);
+        client = newClient(trustedClientSslContext);
+
+        CompletableFuture<WebSocket> connection = client.newWebSocketBuilder()
+            .connectTimeout(CLIENT_TIMEOUT)
+            .buildAsync(serverUri(), new WebSocket.Listener() {});
+
+        assertThatThrownBy(() -> connection.get(CALLBACK_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class);
+        assertThat(server.getConnectedSessions()).as("Sessions").isEmpty();
+    }
+
+    @Test
+    void shouldCloseConnectionsPastConcurrentTlsHandshakeLimit() throws Exception {
+        server = newServer(serverTlsConfiguration)
+            .configure(configurer -> configurer.setMaxConcurrentTlsHandshakes(1))
+            .listen(0);
+
+        // A client that sends no ClientHello keeps its TLS handshake in progress
+        try (Socket pending = new Socket("127.0.0.1", server.getLocalAddress().getPort());
+             Socket rejected = new Socket("127.0.0.1", server.getLocalAddress().getPort())) {
+            pending.setSoTimeout(500);
+            rejected.setSoTimeout(2000);
+
+            assertThat(rejected.getInputStream().read()).as("Connection past the limit should be closed").isEqualTo(-1);
+            assertThatThrownBy(() -> pending.getInputStream().read()).as("Pending handshake should stay open").isInstanceOf(SocketTimeoutException.class);
+        }
+    }
+
+    @Test
     void shouldNotInstallSslHandlerWhenSslIsDisabled() {
         server = newServer(null);
 
@@ -223,6 +292,38 @@ class SslTest {
     }
 
     private static SSLContext createClientSslContext(SelfSignedCertificate trustedCertificate) throws Exception {
+        return createSslContext(null, trustedCertificate);
+    }
+
+    private static SSLContext createClientSslContext(
+        SelfSignedCertificate trustedCertificate,
+        SelfSignedCertificate clientCertificate
+    ) throws Exception {
+        return createSslContext(clientCertificate, trustedCertificate);
+    }
+
+    private static SSLParameters requireClientAuth() {
+        SSLParameters parameters = new SSLParameters();
+        parameters.setNeedClientAuth(true);
+        return parameters;
+    }
+
+    /**
+     * Creates a context that authenticates with its own certificate, if given, and trusts the other one.
+     */
+    private static SSLContext createSslContext(
+        SelfSignedCertificate ownCertificate,
+        SelfSignedCertificate trustedCertificate
+    ) throws Exception {
+        KeyManagerFactory keyManagerFactory = null;
+        if (ownCertificate != null) {
+            KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
+            keyStore.load(null, null);
+            keyStore.setKeyEntry("own", ownCertificate.key(), new char[0], new Certificate[]{ownCertificate.cert()});
+            keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+            keyManagerFactory.init(keyStore, new char[0]);
+        }
+
         KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
         trustStore.load(null, null);
         trustStore.setCertificateEntry("server", trustedCertificate.cert());
@@ -231,7 +332,7 @@ class SslTest {
         trustManagerFactory.init(trustStore);
 
         SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, trustManagerFactory.getTrustManagers(), null);
+        context.init(keyManagerFactory == null ? null : keyManagerFactory.getKeyManagers(), trustManagerFactory.getTrustManagers(), null);
         return context;
     }
 }

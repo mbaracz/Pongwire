@@ -3,6 +3,7 @@ package pl.mbaracz.jwebsockets;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.WriteBufferWaterMark;
@@ -22,12 +23,17 @@ import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionFilte
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensionHandler;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensionHandshaker;
 import io.netty.handler.codec.http.websocketx.extensions.compression.PerMessageDeflateServerExtensionHandshaker;
+import io.netty.handler.ssl.ClientAuth;
+import io.netty.handler.ssl.JdkSslContext;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.handler.stream.ChunkedWriteHandler;
 import pl.mbaracz.jwebsockets.configuration.WebSocketServerConfiguration;
 
 import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLParameters;
 
 import java.io.File;
 import java.security.GeneralSecurityException;
@@ -39,6 +45,8 @@ import java.security.cert.X509Certificate;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Channel initializer for setting up the pipeline for WebSocket server channels.
@@ -53,6 +61,8 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
 
     private final WebSocketServer<T, D> webSocketServer;
     private final SslContext sslContext;
+    private final SSLParameters sslParameters;
+    private final AtomicInteger tlsHandshakes = new AtomicInteger();
 
     /**
      * Constructs a WebSocketServerChannelInitializer with the provided WebSocket server.
@@ -61,7 +71,9 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
      */
     WebSocketServerChannelInitializer(WebSocketServer<T, D> webSocketServer) {
         this.webSocketServer = webSocketServer;
-        this.sslContext = createSslContext(webSocketServer.getConfiguration().getTlsConfiguration());
+        TlsConfiguration tlsConfiguration = webSocketServer.getConfiguration().getTlsConfiguration();
+        this.sslContext = createSslContext(tlsConfiguration);
+        this.sslParameters = tlsConfiguration == null ? null : tlsConfiguration.sslParameters();
     }
 
     /**
@@ -91,7 +103,23 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
         pipeline.addLast(new ReadGate());
 
         if (sslContext != null) {
-            pipeline.addLast(sslContext.newHandler(channel.alloc()));
+            if (!acquireTlsHandshake(configuration.getMaxConcurrentTlsHandshakes())) {
+                channel.close();
+                return;
+            }
+
+            SslHandler sslHandler = sslContext.newHandler(channel.alloc());
+            // The server's handshake timeout runs from the accept and covers the TLS handshake too, so Netty's fixed
+            // 10 seconds would only close connections early during a reconnect storm
+            sslHandler.setHandshakeTimeoutMillis(0);
+            if (sslParameters != null) {
+                sslHandler.engine().setSSLParameters(sslParameters);
+            }
+            pipeline.addLast(sslHandler);
+
+            if (configuration.getMaxConcurrentTlsHandshakes() > 0) {
+                releaseTlsHandshakeWhenDone(channel);
+            }
         }
 
         // The request line has its own limit in Netty, and long query parameters such as tokens count against it
@@ -131,9 +159,58 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
         pipeline.addLast(new WebSocketServerHandler<>(webSocketServer));
     }
 
+    /**
+     * Counts the TLS handshake of the connection against the limit.
+     * A TLS handshake costs far more CPU than the rest of the connection setup, so a reconnect storm past the limit
+     * is turned away early instead of slowing down every handshake.
+     *
+     * @return false if the limit is reached.
+     */
+    private boolean acquireTlsHandshake(int maxConcurrentTlsHandshakes) {
+        if (maxConcurrentTlsHandshakes == 0) {
+            return true;
+        }
+
+        if (tlsHandshakes.incrementAndGet() > maxConcurrentTlsHandshakes) {
+            tlsHandshakes.decrementAndGet();
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Releases the counted TLS handshake once it completes or fails, or the connection closes before.
+     * Added behind the TLS handler, which fires the completion event towards the handlers after it.
+     */
+    private void releaseTlsHandshakeWhenDone(Channel channel) {
+        AtomicBoolean released = new AtomicBoolean();
+        Runnable release = () -> {
+            if (released.compareAndSet(false, true)) {
+                tlsHandshakes.decrementAndGet();
+            }
+        };
+
+        channel.closeFuture().addListener(_ -> release.run());
+        channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+            @Override
+            public void userEventTriggered(ChannelHandlerContext context, Object event) {
+                context.fireUserEventTriggered(event);
+
+                if (event instanceof SslHandshakeCompletionEvent) {
+                    release.run();
+                    context.pipeline().remove(this);
+                }
+            }
+        });
+    }
+
     private static SslContext createSslContext(TlsConfiguration configuration) {
         if (configuration == null) {
             return null;
+        }
+
+        if (configuration.sslContext() != null) {
+            return new JdkSslContext(configuration.sslContext(), false, ClientAuth.NONE);
         }
 
         File certificateChain = configuration.certificateChain().toFile();

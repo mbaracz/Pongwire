@@ -1,5 +1,7 @@
 package pl.mbaracz.jwebsockets;
 
+import javax.net.ssl.SSLSession;
+
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -19,19 +21,22 @@ public final class UpgradeRequest {
     private final Map<String, String> cookies;
     private final Map<String, List<String>> headers;
     private final InetSocketAddress remoteAddress;
+    private final SSLSession sslSession;
 
     UpgradeRequest(
         String path,
         Map<String, List<String>> queryParameters,
         Map<String, String> cookies,
         Map<String, List<String>> headers,
-        InetSocketAddress remoteAddress
+        InetSocketAddress remoteAddress,
+        SSLSession sslSession
     ) {
         this.path = path;
         this.queryParameters = immutableMultiValueMap(queryParameters, false);
         this.cookies = Collections.unmodifiableMap(new LinkedHashMap<>(cookies));
         this.headers = immutableMultiValueMap(headers, true);
         this.remoteAddress = remoteAddress;
+        this.sslSession = sslSession;
     }
 
     public String getPath() {
@@ -87,6 +92,16 @@ public final class UpgradeRequest {
      */
     public InetSocketAddress getRemoteAddress() {
         return remoteAddress;
+    }
+
+    /**
+     * Returns the TLS session of the connection, e.g. to read the client certificate with
+     * {@code getPeerCertificates()} when the TLS context requires client authentication.
+     *
+     * @return the TLS session, or {@code null} without TLS.
+     */
+    public SSLSession getSslSession() {
+        return sslSession;
     }
 
     private static Map<String, List<String>> immutableMultiValueMap(
