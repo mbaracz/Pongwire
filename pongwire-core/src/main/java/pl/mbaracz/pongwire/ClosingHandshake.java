@@ -79,9 +79,10 @@ final class ClosingHandshake {
      * so no message is sent after it.
      *
      * @param channel the channel of the WebSocket connection.
+     * @return true if this close frame is the first one, so the caller bounds the wait for the client's answer.
      */
-    static void markServerStarted(Channel channel) {
-        channel.attr(STATE).setIfAbsent(State.SERVER_STARTED);
+    static boolean markServerStarted(Channel channel) {
+        return channel.attr(STATE).setIfAbsent(State.SERVER_STARTED) == null;
     }
 
     static boolean markClientStarted(Channel channel) {

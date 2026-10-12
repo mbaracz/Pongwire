@@ -3,6 +3,9 @@ package pl.mbaracz.pongwire;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.CodecException;
 import io.netty.handler.codec.DecoderException;
@@ -27,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
@@ -314,6 +318,69 @@ class CompressionTest {
         assertThat(closeFrame.statusCode()).as("Close status").isEqualTo(WebSocketCloseStatus.PROTOCOL_ERROR.code());
         closeFrame.release();
         assertThat(received).as("Message should not be handled").isEmpty();
+    }
+
+    @Test
+    void shouldCloseAfterCloseTimeoutWhenClientDoesNotReadValidatorCloseFrame() {
+        EmbeddedChannel channel = connectWithCompression(server);
+        channel.freezeTime();
+
+        // The validator's close frame waits behind a client that does not read
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+            }
+        });
+        sendContinuationWithRsv1(channel);
+
+        assertThat(channel.isOpen()).as("Should wait for the close frame to be written").isTrue();
+
+        channel.advanceTimeBy(5, TimeUnit.SECONDS);
+        channel.runScheduledPendingTasks();
+
+        assertThat(channel.isOpen()).as("Should close after the close timeout").isFalse();
+    }
+
+    @Test
+    void shouldSendOneCloseFrameWhenSeveralFramesHaveInvalidReservedBits() {
+        EmbeddedChannel channel = connectWithCompression(server);
+        List<CloseWebSocketFrame> closeFrames = new ArrayList<>();
+
+        // Hold the flush, so the connection stays open for the second frame
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+            }
+        });
+        channel.pipeline().addAfter("outboundCloseInfo", "closeFrames", new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void write(ChannelHandlerContext context, Object message, ChannelPromise promise) {
+                if (message instanceof CloseWebSocketFrame closeFrame) {
+                    closeFrames.add(closeFrame);
+                }
+                context.write(message, promise);
+            }
+        });
+        // The reserved bits validator behind the compression decoder would fail the connection a second time
+        sendContinuationWithRsv1(channel, new TextWebSocketFrame(true, 0b010, Unpooled.EMPTY_BUFFER));
+
+        assertThat(closeFrames).as("Should fail the connection once").hasSize(1);
+    }
+
+    /**
+     * Sends a compressed message whose continuation frame carries RSV1, followed by the given frames in the same read.
+     */
+    private static void sendContinuationWithRsv1(EmbeddedChannel channel, WebSocketFrame... followingFrames) {
+        ByteBuf compressed = compress("Hello, compressed world");
+        int half = compressed.readableBytes() / 2;
+        List<WebSocketFrame> frames = new ArrayList<>(List.of(
+            new TextWebSocketFrame(false, RSV1, compressed.retainedSlice(0, half)),
+            new ContinuationWebSocketFrame(true, RSV1, compressed.retainedSlice(half, compressed.readableBytes() - half))
+        ));
+        frames.addAll(Arrays.asList(followingFrames));
+        compressed.release();
+
+        Util.sendFromClient(channel, frames.toArray(WebSocketFrame[]::new));
     }
 
     @Test

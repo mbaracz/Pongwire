@@ -428,7 +428,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         }
 
         // The frame decoder leaves protocol violations to this handler, also a Close frame with an invalid status code.
-        // The close frame then passes OutboundCloseInfoHandler, so onClose reports its status instead of 1006.
+        // The close frame then passes OutboundCloseInfoHandler, so onClose reports its status instead of 1006
+        // and a client that does not read cannot keep the close frame and the connection pending.
         // Other decoding failures of an open session, e.g. of the compression decoder, leave its state broken too.
         // An application callback throwing such an exception is still a server failure.
         if (clientFailure && (cause instanceof CorruptedWebSocketFrameException || cause instanceof DecoderException && openedSession != null)) {
@@ -443,9 +444,6 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                 context.writeAndFlush(new CloseWebSocketFrame(status, reason))
                     .addListener(ChannelFutureListener.CLOSE);
             }
-
-            // A client that does not read would keep the close frame and the connection pending
-            ClosingHandshake.closeAfter(context.channel(), webSocketServer.getConfiguration().getCloseTimeout());
             return;
         }
 
@@ -876,7 +874,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                 context.pipeline().addAfter(
                     context.pipeline().context(WebSocketFrameEncoder.class).name(),
                     "outboundCloseInfo",
-                    new OutboundCloseInfoHandler()
+                    new OutboundCloseInfoHandler(configuration.getCloseTimeout())
                 );
                 // Replies written while one read batch is handled leave in one write.
                 // Added after the handshake, so the HTTP response is flushed as before.
