@@ -18,7 +18,8 @@ final class ClosingHandshake {
 
     private enum State {
         CLIENT_STARTED,
-        SERVER_STARTED
+        SERVER_STARTED,
+        SERVER_FAILED
     }
 
     private static final AttributeKey<State> STATE = AttributeKey.valueOf(ClosingHandshake.class, "state");
@@ -75,14 +76,14 @@ final class ClosingHandshake {
     }
 
     /**
-     * Marks the connection as closing once any close frame is written, also one written by Netty's validators,
-     * so no message is sent after it.
+     * Marks the connection as failed once a close frame other than the one of {@link #start} is written,
+     * e.g. by Netty's validators, so nothing is sent after it (RFC 6455, section 7.1.7).
      *
      * @param channel the channel of the WebSocket connection.
      * @return true if this close frame is the first one, so the caller bounds the wait for the client's answer.
      */
-    static boolean markServerStarted(Channel channel) {
-        return channel.attr(STATE).setIfAbsent(State.SERVER_STARTED) == null;
+    static boolean markFailed(Channel channel) {
+        return channel.attr(STATE).setIfAbsent(State.SERVER_FAILED) == null;
     }
 
     static boolean markClientStarted(Channel channel) {
@@ -91,5 +92,18 @@ final class ClosingHandshake {
 
     static boolean isClosing(Channel channel) {
         return channel.attr(STATE).get() != null;
+    }
+
+    /**
+     * Whether a Ping still gets its Pong. The closing handshake the server started gracefully with {@link #start}
+     * keeps answering until the client's close frame arrives (RFC 6455, section 5.5.2), while a failed connection
+     * and a connection whose client sent its close frame send nothing more.
+     *
+     * @param channel the channel of the WebSocket connection.
+     * @return true if a Ping is answered.
+     */
+    static boolean answersPings(Channel channel) {
+        State state = channel.attr(STATE).get();
+        return state == null || state == State.SERVER_STARTED;
     }
 }

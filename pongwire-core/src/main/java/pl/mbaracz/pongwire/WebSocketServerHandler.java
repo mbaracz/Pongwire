@@ -329,7 +329,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     public void channelWritabilityChanged(ChannelHandlerContext context) {
         // Before the application callback, which could fill the write buffer again and keep the Pong waiting.
         // The field is cleared first, because the write can change the writability and call this method again.
-        if (deferredPongPayload != null && ClosingHandshake.isClosing(context.channel())) {
+        if (deferredPongPayload != null && !ClosingHandshake.answersPings(context.channel())) {
             releaseDeferredPong();
         } else if (deferredPongPayload != null && context.channel().isWritable()) {
             ByteBuf payload = deferredPongPayload;
@@ -1020,9 +1020,10 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
      * @param pingFrame the received Ping.
      */
     private void answerPing(ChannelHandlerContext context, PingWebSocketFrame pingFrame) {
-        // Nothing may follow a sent close frame (RFC 6455, section 5.5.1).
-        // A validator's close frame may still wait for the flush at the end of the read that also carried this Ping.
-        if (ClosingHandshake.isClosing(context.channel())) {
+        // A failed connection sends nothing more, and its validator's close frame may still wait for the flush
+        // at the end of the read that also carried this Ping. A graceful close keeps answering until the client's
+        // close frame arrives (RFC 6455, section 5.5.2).
+        if (!ClosingHandshake.answersPings(context.channel())) {
             return;
         }
 

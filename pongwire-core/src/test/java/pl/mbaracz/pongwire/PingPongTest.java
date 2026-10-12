@@ -11,6 +11,7 @@ import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocket13FrameDecoder;
+import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.AfterEach;
@@ -189,6 +190,69 @@ class PingPongTest {
         client.writeInbound(written.getFirst());
         assertThat(client.<Object>readInbound()).as("Written frame").isInstanceOf(CloseWebSocketFrame.class).satisfies(ReferenceCountUtil::release);
         client.finishAndReleaseAll();
+    }
+
+    @Test
+    void shouldAnswerPingWhileWaitingForClientCloseFrame() {
+        List<WebSocketSession<String, Object>> sessions = new ArrayList<>();
+        server.onOpen(sessions::add);
+        EmbeddedChannel channel = Util.connect(server);
+        List<WebSocketFrame> written = recordWrittenFrames(channel);
+        sessions.getFirst().close(WebSocketCloseStatus.NORMAL_CLOSURE.code(), "bye");
+
+        Util.sendFromClient(channel, new PingWebSocketFrame(Unpooled.copiedBuffer("ping", StandardCharsets.UTF_8)));
+
+        assertThat(written).as("Should write the close frame and the Pong").hasSize(2);
+        assertThat(written.get(1)).as("Should answer the Ping until the client's close frame arrives").isInstanceOf(PongWebSocketFrame.class);
+        written.forEach(WebSocketFrame::release);
+    }
+
+    @Test
+    void shouldAnswerDeferredPingWhenGracefulCloseStartedMeanwhile() {
+        List<WebSocketSession<String, Object>> sessions = new ArrayList<>();
+        server.configure(configurer -> configurer.setWriteBufferWaterMark(1024, 2048)).onOpen(sessions::add);
+        EmbeddedChannel channel = Util.connect(server);
+        List<WebSocketFrame> written = recordWrittenFrames(channel);
+        OutboundGate gate = holdFlushes(channel);
+        channel.writeAndFlush(new TextWebSocketFrame("x".repeat(4096)));
+
+        Util.sendFromClient(channel, new PingWebSocketFrame(Unpooled.copiedBuffer("ping", StandardCharsets.UTF_8)));
+        sessions.getFirst().close(WebSocketCloseStatus.NORMAL_CLOSURE.code(), "bye");
+        gate.open(channel);
+
+        assertThat(written).as("Should write the text, the close frame and the Pong").hasSize(3);
+        assertThat(written.get(2)).as("Should answer the deferred Ping").isInstanceOf(PongWebSocketFrame.class);
+        written.forEach(WebSocketFrame::release);
+    }
+
+    @Test
+    void shouldNotAnswerPingAfterClientCloseFrame() {
+        EmbeddedChannel channel = Util.connect(server);
+        List<WebSocketFrame> written = recordWrittenFrames(channel);
+
+        Util.sendFromClient(channel, new CloseWebSocketFrame(WebSocketCloseStatus.NORMAL_CLOSURE), new PingWebSocketFrame());
+
+        assertThat(written).as("Should only echo the close frame").hasSize(1);
+        assertThat(written.getFirst()).isInstanceOf(CloseWebSocketFrame.class);
+        written.forEach(WebSocketFrame::release);
+    }
+
+    /**
+     * Records the frames the server writes, also those after a close frame, which a client's decoder would skip.
+     */
+    private static List<WebSocketFrame> recordWrittenFrames(EmbeddedChannel channel) {
+        List<WebSocketFrame> frames = new ArrayList<>();
+
+        channel.pipeline().addAfter("outboundCloseInfo", "writtenFrames", new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void write(ChannelHandlerContext context, Object message, ChannelPromise promise) {
+                if (message instanceof WebSocketFrame frame) {
+                    frames.add(frame.retainedDuplicate());
+                }
+                context.write(message, promise);
+            }
+        });
+        return frames;
     }
 
     @Test

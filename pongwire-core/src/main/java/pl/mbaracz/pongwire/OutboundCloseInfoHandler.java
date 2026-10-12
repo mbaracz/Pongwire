@@ -28,7 +28,7 @@ final class OutboundCloseInfoHandler extends ChannelOutboundHandlerAdapter {
             context.channel().attr(CloseInfo.KEY).setIfAbsent(new CloseInfo(code, frame.reasonText()));
 
             // The closing handshake started by the server schedules its own timeout before it writes the frame
-            if (ClosingHandshake.markServerStarted(context.channel())) {
+            if (ClosingHandshake.markFailed(context.channel())) {
                 ClosingHandshake.closeAfter(context.channel(), closeTimeout);
             }
         }
