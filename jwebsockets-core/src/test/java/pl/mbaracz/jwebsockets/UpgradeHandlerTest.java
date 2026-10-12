@@ -131,6 +131,18 @@ class UpgradeHandlerTest {
     }
 
     @Test
+    void shouldKeepCookiesWhoseValuesAreNotStrictRfc6265() {
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().set(HttpHeaderNames.COOKIE, "prefs={\"lang\":\"pl\"}; token=alice");
+
+        channel.writeInbound(request);
+
+        assertThat(lastUpgradeRequest.getCookie("prefs")).as("Legacy JSON cookie").isEqualTo("{\"lang\":\"pl\"}");
+        assertThat(lastUpgradeRequest.getCookie("token")).as("Session cookie").isEqualTo("alice");
+    }
+
+    @Test
     void shouldExposeParsedRequestMetadata() {
         EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
         FullHttpRequest request = Util.createHttpRequest("/chat?room=general&tag=a&tag=b");

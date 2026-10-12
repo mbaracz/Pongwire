@@ -63,6 +63,8 @@ public final class UpgradeRequest {
 
     /**
      * Returns the value of the named cookie.
+     * Cookies are parsed leniently, like browsers send them, also values that are not strict RFC 6265.
+     * The raw header is available through {@code getHeader("Cookie")}.
      *
      * @return the cookie value, or {@code null} if the cookie is absent.
      */

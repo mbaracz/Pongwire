@@ -916,7 +916,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         Map<String, String> cookies = new LinkedHashMap<>();
 
         for (String cookieHeader : request.headers().getAll(HttpHeaderNames.COOKIE)) {
-            for (Cookie cookie : ServerCookieDecoder.STRICT.decodeAll(cookieHeader)) {
+            for (Cookie cookie : ServerCookieDecoder.LAX.decodeAll(cookieHeader)) {
                 cookies.put(cookie.name(), cookie.value());
             }
         }
