@@ -6,16 +6,22 @@ import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageEncoder;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.WebSocket;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.InstanceOfAssertFactories.type;
@@ -169,5 +175,61 @@ class CallbackFailureTest {
         assertThat(subscriptions).as("onMessage should run").hasSize(1);
         assertThat(subscriptions.getFirst()).as("Subscribe should fail through its stage").isCompletedExceptionally();
         assertThat(errors).as("Subscribe should not throw from the callback").isEmpty();
+    }
+
+    @Test
+    void shouldRunOnlyCloseCallbackWhenExecutorRejectsCallbacksOfClosedSession() {
+        List<String> received = new ArrayList<>();
+        server.onMessage((_, message) -> received.add(message));
+        EmbeddedChannel channel = Util.connect(server);
+        Util.sendFromClient(channel, new TextWebSocketFrame("first"), new TextWebSocketFrame("second"));
+
+        // The client disconnects and the executor shuts down while the first message is handled
+        channel.close();
+        executorShutDown = true;
+        runCallbacks(channel);
+
+        assertThat(received).as("The message queued behind the rejection should be dropped").containsExactly("first");
+        assertThat(closeCodes).as("The close callback should still run").containsExactly(WebSocketCloseStatus.ABNORMAL_CLOSURE.code());
+        assertThat(errors).as("Rejection should be reported once").singleElement().isInstanceOf(RejectedExecutionException.class);
+    }
+
+    @Test
+    @Timeout(10)
+    void shouldReportCloseCallbackFailureWhenItIsRejectedAfterEventLoopTerminated() throws Exception {
+        IllegalStateException failure = new IllegalStateException("close failed");
+        CountDownLatch received = new CountDownLatch(1);
+        server
+            .onMessage((_, _) -> {})
+            .onClose((_, _, _) -> {
+                throw failure;
+            })
+            .observer(new WebSocketServerObserver<>() {
+                @Override
+                public void messageReceived(WebSocketSession<String, Object> session) {
+                    received.countDown();
+                }
+            });
+        server.listen(0);
+        HttpClient client = HttpClient.newBuilder().build();
+
+        try {
+            WebSocket webSocket = client.newWebSocketBuilder()
+                .buildAsync(URI.create("ws://127.0.0.1:" + server.getLocalAddress().getPort()), new WebSocket.Listener() {
+                })
+                .get(5, TimeUnit.SECONDS);
+            webSocket.sendText("message", true).get(5, TimeUnit.SECONDS);
+
+            // The close callback queues behind the message callback, then stop() terminates the event loops
+            // and the executor rejects the close callback once the message callback ran
+            assertThat(received.await(5, TimeUnit.SECONDS)).as("Message should be received").isTrue();
+            server.stop();
+            executorShutDown = true;
+            callbacks.remove().run();
+
+            assertThat(errors).as("The failure of the close callback should reach the error handler").containsExactly(failure);
+        } finally {
+            client.shutdownNow();
+        }
     }
 }

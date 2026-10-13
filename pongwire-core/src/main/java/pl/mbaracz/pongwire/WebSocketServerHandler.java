@@ -89,6 +89,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     private WebSocketSession<T, D> openedSession;
     private boolean closeHandled;
 
+    // The close callback of the session, the only one that still runs when the callback executor rejects it,
+    // and whether a rejection was already reported, so a rejected backlog is reported once
+    private volatile Runnable closeCallback;
+    private boolean rejectionReported;
+
     // Whether a writability callback waits to run, and the writability it reported last, accessed only by the callbacks
     private final AtomicBoolean writabilityCallbackPending = new AtomicBoolean();
     private boolean reportedWritable = true;
@@ -639,7 +644,8 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         CloseHandler<T, D> closeHandler = webSocketServer.getCloseHandler();
 
         if (closeHandler != null) {
-            runCallback(context, () -> closeHandler.handleClose(session, closeInfo.reason(), closeInfo.code()));
+            closeCallback = () -> closeHandler.handleClose(session, closeInfo.reason(), closeInfo.code());
+            runCallback(context, closeCallback);
         }
 
         session.markClosed();
@@ -1278,7 +1284,7 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             onEventLoop(context, () -> {
                 resumeReading(context, maxPending);
                 handleRejectedCallback(context, callback, exception);
-            }, callback);
+            }, () -> handleRejectedCallbackAfterTermination(context, callback, exception));
         });
     }
 
@@ -1325,16 +1331,18 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     }
 
     /**
-     * Handles a callback the callback executor did not accept. The callback of a closed session, such as onClose,
-     * runs on the event loop instead, so the application can still clean up.
-     * An open session cannot be served anymore and is closed with 1013 (try again later), whatever the closeOnException setting.
+     * Handles a callback the callback executor did not accept.
+     * The close callback still runs on the event loop, so the application can clean up, the other callbacks
+     * of a closed or closing session are dropped, and so are the ones queued behind the first rejection.
+     * The first rejection is reported, and it closes an open session with 1013 (try again later),
+     * whatever the closeOnException setting.
      *
      * @param context   the channel handler context.
      * @param callback  the rejected callback.
      * @param exception the rejection.
      */
     private void handleRejectedCallback(ChannelHandlerContext context, Runnable callback, RejectedExecutionException exception) {
-        if (closeHandled) {
+        if (callback == closeCallback) {
             try {
                 callback.run();
             } catch (Throwable failure) {
@@ -1343,21 +1351,51 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             return;
         }
 
-        // The first rejection already closes the session, the callbacks queued after it are dropped
-        if (ClosingHandshake.isClosing(context.channel())) {
+        if (rejectionReported) {
             return;
         }
+        rejectionReported = true;
 
         // Reported without the close policy, which could close the connection before the close frame is sent
         LOGGER.error("Callback executor rejected a callback in channel with id {}", context.channel().id(), exception);
         notifyErrorHandler(exception);
         notifyObserver(observer -> observer.exception(openedSession, exception));
 
+        if (closeHandled || ClosingHandshake.isClosing(context.channel())) {
+            return;
+        }
+
         if (openedSession != null) {
             CloseWebSocketFrame frame = new CloseWebSocketFrame(WebSocketCloseStatus.TRY_AGAIN_LATER);
             ClosingHandshake.start(context.channel(), frame, webSocketServer.getConfiguration().getCloseTimeout());
         } else {
             context.close();
+        }
+    }
+
+    /**
+     * Handles a rejected callback once the event loop is terminated, e.g. after the server stopped.
+     * Only the close callback runs, on the rejecting thread, and like in {@link #reportCallbackFailure}
+     * only the error handler and the observer are notified.
+     *
+     * @param context   the channel handler context.
+     * @param callback  the rejected callback.
+     * @param exception the rejection.
+     */
+    private void handleRejectedCallbackAfterTermination(ChannelHandlerContext context, Runnable callback, RejectedExecutionException exception) {
+        if (callback != closeCallback) {
+            LOGGER.error("Callback executor rejected a callback in channel with id {}", context.channel().id(), exception);
+            notifyErrorHandler(exception);
+            notifyObserver(observer -> observer.exception(openedSession, exception));
+            return;
+        }
+
+        try {
+            callback.run();
+        } catch (Throwable failure) {
+            LOGGER.error("Callback failed in channel with id {}", context.channel().id(), failure);
+            notifyErrorHandler(failure);
+            notifyObserver(observer -> observer.exception(openedSession, failure));
         }
     }
 
