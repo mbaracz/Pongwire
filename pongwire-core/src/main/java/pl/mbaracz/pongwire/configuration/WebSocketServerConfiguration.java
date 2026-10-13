@@ -603,6 +603,7 @@ public final class WebSocketServerConfiguration<T> {
         /**
          * Sets how long a topic broker operation (subscribe, unsubscribe or publish) may take before it fails, so a broker
          * that does not answer does not block the later operations of the topic.
+         * A timed-out subscribe or unsubscribe leaves the topic unsubscribed, the next subscriber subscribes it again.
          *
          * @param brokerOperationTimeout Broker operation timeout, positive, 30 seconds by default.
          * @return This builder.

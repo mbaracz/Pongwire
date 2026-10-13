@@ -2,29 +2,35 @@ package pl.mbaracz.pongwire;
 
 import io.netty.channel.DefaultChannelId;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageEncoder;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.InstanceOfAssertFactories.type;
 
 class TopicBrokerTest {
 
     private static final class RecordingTopicBroker implements TopicBroker<String> {
 
-        private final List<String> calls = new ArrayList<>();
-        private final List<TopicMessageHandler<String>> handlers = new ArrayList<>();
+        // Recorded from the test thread and from the timeout thread
+        private final List<String> calls = new CopyOnWriteArrayList<>();
+        private final List<TopicMessageHandler<String>> handlers = new CopyOnWriteArrayList<>();
         private CompletionStage<Void> subscribeResult = CompletableFuture.completedFuture(null);
         private CompletionStage<Void> unsubscribeResult = CompletableFuture.completedFuture(null);
         private CompletionStage<Void> publishResult = CompletableFuture.completedFuture(null);
@@ -339,6 +345,29 @@ class TopicBrokerTest {
     }
 
     @Test
+    void shouldKeepBrokerSubscribedWhenOlderAttemptRollsBackAfterFailedUnsubscribe() {
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        CompletableFuture<Void> first = new CompletableFuture<>();
+        broker.subscribeResult = first;
+
+        // A pending, unsubscribe, B, unsubscribe again, the last broker unsubscribe fails and keeps the handler
+        server.subscribe(session, "topic");
+        server.unsubscribe(session, "topic");
+        broker.subscribeResult = CompletableFuture.completedFuture(null);
+        server.subscribe(session, "topic");
+        broker.unsubscribeResult = CompletableFuture.failedFuture(new IllegalStateException("broker unavailable"));
+        server.unsubscribe(session, "topic");
+        first.completeExceptionally(new IllegalStateException("broker unavailable"));
+
+        // The topic is still subscribed with the broker, so the next subscriber reuses it
+        broker.subscribeResult = CompletableFuture.completedFuture(null);
+        server.subscribe(session, "topic").toCompletableFuture().join();
+
+        assertThat(broker.calls).as("Broker calls").containsExactly("subscribe topic", "subscribe topic", "unsubscribe topic");
+    }
+
+    @Test
     void shouldCompleteSubscribeStageAfterRollingBackFailedSubscription() {
         EmbeddedChannel channel = Util.connect(server);
         WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
@@ -350,6 +379,226 @@ class TopicBrokerTest {
         pending.completeExceptionally(new IllegalStateException("broker unavailable"));
 
         assertThat(subscribedWhenFailed).as("The failure continuation should see the session unsubscribed").isFalse();
+    }
+
+    @Test
+    void shouldSubscribeAgainWithNewHandlerWhenUnsubscribeTimedOut() {
+        server.configure(configurer -> configurer.setBrokerOperationTimeout(Duration.ofMillis(100)));
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        server.subscribe(session, "topic").toCompletableFuture().join();
+        CompletableFuture<Void> unsubscribing = new CompletableFuture<>();
+        broker.unsubscribeResult = unsubscribing;
+
+        CompletableFuture<Void> unsubscribe = server.unsubscribe(session, "topic").toCompletableFuture();
+
+        assertThat(unsubscribe).as("Unsubscribe should time out").failsWithin(5, TimeUnit.SECONDS);
+
+        // The broker removes the handler after all, so the old subscription must not be reused
+        unsubscribing.complete(null);
+        server.subscribe(session, "topic").toCompletableFuture().join();
+
+        assertThat(broker.calls).as("Broker calls").containsExactly("subscribe topic", "unsubscribe topic", "subscribe topic");
+        assertThat(broker.handlers.get(2)).as("A new handler should be subscribed").isNotSameAs(broker.handlers.get(0));
+    }
+
+    @Test
+    void shouldDropHandlerWhenSubscribeSucceedsAfterTimeout() {
+        server.configure(configurer -> configurer.setBrokerOperationTimeout(Duration.ofMillis(100)));
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        CompletableFuture<Void> subscribing = new CompletableFuture<>();
+        broker.subscribeResult = subscribing;
+
+        CompletableFuture<Void> subscribe = server.subscribe(session, "topic").toCompletableFuture();
+
+        assertThat(subscribe).as("Subscribe should time out").failsWithin(5, TimeUnit.SECONDS);
+
+        subscribing.complete(null);
+        broker.handlers.getFirst().onMessage("topic", "late");
+        channel.runPendingTasks();
+
+        assertThat(broker.calls).as("Broker calls").containsExactly("subscribe topic", "unsubscribe topic");
+        assertThat(broker.handlers.get(1)).as("The late handler should be unsubscribed").isSameAs(broker.handlers.getFirst());
+        assertThat(Util.readFromServer(channel)).as("The late handler should deliver nothing").isNull();
+    }
+
+    @Test
+    void shouldKeepHandlerFailedUnsubscribeLeftWhenEarlierResubscribeInstalledNewOne() {
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        server.subscribe(session, "topic").toCompletableFuture().join();
+        CompletableFuture<Void> firstUnsubscribe = new CompletableFuture<>();
+        broker.unsubscribeResult = firstUnsubscribe;
+
+        // Unsubscribe, subscribe, unsubscribe, subscribe queue up while the first unsubscribe is pending,
+        // the second unsubscribe fails and leaves the handler of the resubscribe with the broker
+        server.unsubscribe(session, "topic");
+        server.subscribe(session, "topic");
+        broker.unsubscribeResult = CompletableFuture.failedFuture(new IllegalStateException("broker unavailable"));
+        server.unsubscribe(session, "topic");
+        CompletableFuture<Void> lastSubscribe = server.subscribe(session, "topic").toCompletableFuture();
+        firstUnsubscribe.complete(null);
+
+        assertThat(lastSubscribe).as("Last subscribe").succeedsWithin(5, TimeUnit.SECONDS);
+        assertThat(broker.handlers).as("Broker handlers").hasSize(4);
+        assertThat(broker.handlers.get(3)).as("The failed unsubscribe worked on the resubscribed handler").isSameAs(broker.handlers.get(2));
+
+        broker.handlers.get(2).onMessage("topic", "delivered");
+        channel.runPendingTasks();
+
+        TextWebSocketFrame frame = assertThat(Util.readFromServer(channel)).asInstanceOf(type(TextWebSocketFrame.class)).actual();
+        assertThat(frame.text()).as("The handler the broker holds should deliver").isEqualTo("delivered");
+        frame.release();
+    }
+
+    @Test
+    void shouldDropHandlerWhenSubscribeSucceedsAfterTimeoutBehindQueuedOperations() {
+        server.configure(configurer -> configurer.setBrokerOperationTimeout(Duration.ofMillis(100)));
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        CompletableFuture<Void> subscribing = new CompletableFuture<>();
+        CompletableFuture<Void> publishing = new CompletableFuture<>();
+        broker.subscribeResult = subscribing;
+        broker.publishResult = publishing;
+
+        // A publish and an unsubscribe queue up behind the pending subscribe
+        CompletableFuture<Void> subscribe = server.subscribe(session, "topic").toCompletableFuture();
+        server.publish("topic", "message");
+        server.unsubscribe(session, "topic");
+
+        assertThat(subscribe).as("Subscribe should time out").failsWithin(5, TimeUnit.SECONDS);
+
+        subscribing.complete(null);
+
+        assertThat(broker.calls).as("Broker calls").containsExactly("subscribe topic", "publish topic message", "unsubscribe topic");
+        assertThat(broker.handlers.get(1)).as("The late handler should be unsubscribed").isSameAs(broker.handlers.getFirst());
+        publishing.complete(null);
+    }
+
+    @Test
+    void shouldDropHandlerWhenTimeoutContinuationCompletesBrokerSubscribe() {
+        server.configure(configurer -> configurer.setBrokerOperationTimeout(Duration.ofMillis(100)));
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        CompletableFuture<Void> subscribing = new CompletableFuture<>();
+        broker.subscribeResult = subscribing;
+
+        // The application reacts to the timeout by completing the broker's own stage
+        CompletableFuture<Void> subscribe = server.subscribe(session, "topic")
+            .whenComplete((_, _) -> subscribing.complete(null))
+            .toCompletableFuture();
+
+        assertThat(subscribe).as("Subscribe should time out").failsWithin(5, TimeUnit.SECONDS);
+        // The cleanup runs on the timeout thread, after the continuation that woke this thread
+        awaitCalls(2);
+        assertThat(broker.calls).as("Broker calls").containsExactly("subscribe topic", "unsubscribe topic");
+    }
+
+    @Test
+    void shouldNotDeliverThroughHandlerOfTimedOutUnsubscribeWhenResubscribeInstalledIt() {
+        server.configure(configurer -> configurer.setBrokerOperationTimeout(Duration.ofMillis(100)));
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        server.subscribe(session, "topic").toCompletableFuture().join();
+        CompletableFuture<Void> firstUnsubscribe = new CompletableFuture<>();
+        CompletableFuture<Void> publishing = new CompletableFuture<>();
+        broker.unsubscribeResult = firstUnsubscribe;
+
+        // Unsubscribe, subscribe, unsubscribe, publish, subscribe queue up while the first unsubscribe is pending,
+        // the second unsubscribe works on the handler of the resubscribe and times out
+        server.unsubscribe(session, "topic");
+        server.subscribe(session, "topic");
+        broker.unsubscribeResult = new CompletableFuture<>();
+        CompletableFuture<Void> secondUnsubscribe = server.unsubscribe(session, "topic").toCompletableFuture();
+        broker.publishResult = publishing;
+        server.publish("topic", "message");
+        server.subscribe(session, "topic");
+        firstUnsubscribe.complete(null);
+
+        assertThat(secondUnsubscribe).as("Second unsubscribe should time out").failsWithin(5, TimeUnit.SECONDS);
+        assertThat(broker.handlers).as("Broker handlers").hasSize(4);
+
+        broker.handlers.get(2).onMessage("topic", "stale");
+        channel.runPendingTasks();
+
+        assertThat(Util.readFromServer(channel)).as("The timed-out handler should deliver nothing").isNull();
+        publishing.complete(null);
+    }
+
+    private void awaitCalls(int count) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+
+        while (broker.calls.size() < count && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+    }
+
+    @Test
+    void shouldNotDeliverThroughHandlerOfTimedOutUnsubscribeWhileResubscribeWaits() {
+        server.configure(configurer -> configurer.setBrokerOperationTimeout(Duration.ofMillis(100)));
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        server.subscribe(session, "topic").toCompletableFuture().join();
+        TopicMessageHandler<String> handler = broker.handlers.getFirst();
+        CompletableFuture<Void> publishing = new CompletableFuture<>();
+        broker.unsubscribeResult = new CompletableFuture<>();
+        broker.publishResult = publishing;
+
+        // A publish and a new subscribe queue up behind the unsubscribe that times out
+        CompletableFuture<Void> unsubscribe = server.unsubscribe(session, "topic").toCompletableFuture();
+        server.publish("topic", "message");
+        server.subscribe(session, "topic");
+
+        assertThat(unsubscribe).as("Unsubscribe should time out").failsWithin(5, TimeUnit.SECONDS);
+
+        handler.onMessage("topic", "stale");
+        channel.runPendingTasks();
+
+        assertThat(Util.readFromServer(channel)).as("The timed-out handler should deliver nothing").isNull();
+        publishing.complete(null);
+    }
+
+    @Test
+    @Timeout(10)
+    void shouldDeliverToSubscribersOfItsOwnSubscriptionWhenHandlerIsRetiredDuringEncoding() throws Exception {
+        CountDownLatch encoding = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        server.configure(configurer -> configurer
+            .setBrokerOperationTimeout(Duration.ofMillis(100))
+            .setMessageEncoder(message -> {
+                if (message.equals("old")) {
+                    encoding.countDown();
+                    awaitQuietly(release);
+                }
+                return message.getBytes(StandardCharsets.UTF_8);
+            }));
+        EmbeddedChannel first = Util.connect(server);
+        server.subscribe(server.getSessionByChannelId(first.id()), "topic").toCompletableFuture().join();
+        TopicMessageHandler<String> handler = broker.handlers.getFirst();
+
+        // The old handler passes its check and blocks in the encoder while its subscription is replaced
+        Thread delivery = Thread.ofPlatform().start(() -> handler.onMessage("topic", "old"));
+        assertThat(encoding.await(5, TimeUnit.SECONDS)).isTrue();
+        broker.unsubscribeResult = new CompletableFuture<>();
+        assertThat(server.unsubscribe(server.getSessionByChannelId(first.id()), "topic").toCompletableFuture())
+            .failsWithin(5, TimeUnit.SECONDS);
+        EmbeddedChannel second = Util.connect(server);
+        broker.subscribeResult = CompletableFuture.completedFuture(null);
+        server.subscribe(server.getSessionByChannelId(second.id()), "topic").toCompletableFuture().join();
+        release.countDown();
+        delivery.join();
+        second.runPendingTasks();
+
+        assertThat(Util.readFromServer(second)).as("The new subscriber should not get the old message").isNull();
+    }
+
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            latch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @Test

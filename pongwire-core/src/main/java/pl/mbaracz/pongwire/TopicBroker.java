@@ -13,6 +13,11 @@ import java.util.concurrent.CompletionStage;
  * {@link TopicMessageHandler#onMessage} encodes the message and queues it for the sessions without blocking,
  * so it may be called from any thread, including an I/O thread of the broker.
  *
+ * The server gives up on an operation after the broker operation timeout and then forgets the subscription.
+ * It may subscribe the topic again with a new handler while the broker still completes the old operation,
+ * and it unsubscribes a handler the broker may have dropped already, so unsubscribing an unknown handler must
+ * succeed and a handler must not be shared between subscriptions.
+ *
  * Broker lifecycle is owned by the application.
  *
  * @param <T> the topic message type

@@ -31,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -39,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 /**
@@ -80,8 +82,6 @@ public class WebSocketServer<T, D> {
     private final AtomicInteger connections = new AtomicInteger();
     private final Map<InetAddress, Integer> connectionsByAddress = new ConcurrentHashMap<>();
     private final SessionTopicRegistry<T, D> sessionTopicRegistry = new SessionTopicRegistry<>();
-    // Replaced with the broker, so a handler a retired broker still holds after a failed unsubscribe delivers nothing
-    private volatile TopicMessageHandler<T> topicMessageHandler = newTopicMessageHandler();
     // Read without the lock by publish, changed only under sessionTopicLock
     private final Map<String, CompletableFuture<Void>> topicBrokerOperations = new ConcurrentHashMap<>();
     private final Map<String, BrokerSubscription> brokerSubscriptions = new HashMap<>();
@@ -254,9 +254,6 @@ public class WebSocketServer<T, D> {
                     );
                 }
 
-                if (this.topicBroker != topicBroker) {
-                    topicMessageHandler = newTopicMessageHandler();
-                }
                 this.topicBroker = topicBroker;
             }
         }
@@ -273,15 +270,96 @@ public class WebSocketServer<T, D> {
                 .anyMatch(subscription -> subscription.status != BrokerSubscriptionStatus.UNSUBSCRIBED);
     }
 
-    private TopicMessageHandler<T> newTopicMessageHandler() {
+    /**
+     * Creates the handler of one broker subscription.
+     * It delivers only while it is the handler of the subscription the server tracks for the topic, so a handler
+     * a broker still holds after a failed or timed-out unsubscribe, or a replaced broker, delivers nothing.
+     */
+    private TopicMessageHandler<T> newTopicMessageHandler(BrokerSubscription subscription) {
         return new TopicMessageHandler<>() {
             @Override
             public void onMessage(String topic, T message) {
-                if (topicMessageHandler == this) {
-                    handleTopicMessage(topic, message);
+                Collection<WebSocketSession<T, D>> subscribers;
+
+                // The subscribers are taken with the check, so a handler retired meanwhile cannot deliver to the
+                // subscribers of the subscription that replaced it
+                synchronized (sessionTopicLock) {
+                    if (brokerSubscriptions.get(topic) != subscription || subscription.handler != this) {
+                        return;
+                    }
+                    subscribers = sessionTopicRegistry.getSubscribers(topic);
                 }
+
+                handleTopicMessage(subscribers, message);
             }
         };
+    }
+
+    /**
+     * One subscribe call to the broker.
+     * A subscription the broker completes after the server gave up on it, e.g. after its timeout, was forgotten
+     * already, so the broker is asked to drop the handler, whichever of the two happens second.
+     */
+    private final class SubscribeAttempt {
+
+        private final TopicBroker<T> broker;
+        private final String topic;
+        private final TopicMessageHandler<T> handler;
+        private final AtomicBoolean retired = new AtomicBoolean();
+        private final AtomicBoolean subscribed = new AtomicBoolean();
+        private final AtomicBoolean dropped = new AtomicBoolean();
+
+        private SubscribeAttempt(TopicBroker<T> broker, String topic, TopicMessageHandler<T> handler) {
+            this.broker = broker;
+            this.topic = topic;
+            this.handler = handler;
+        }
+
+        private CompletionStage<Void> subscribe() {
+            CompletionStage<Void> stage = broker.subscribe(topic, handler);
+
+            stage.whenComplete((_, failure) -> {
+                if (failure == null) {
+                    subscribed.set(true);
+                    dropIfRetired();
+                }
+            });
+            return stage;
+        }
+
+        /**
+         * Gives the attempt up once the server's stage of it fails, e.g. by its timeout.
+         */
+        private void retireOnFailure(PendingBrokerOperation operation) {
+            operation.result.whenComplete((_, failure) -> {
+                if (failure != null) {
+                    retired.set(true);
+                    dropIfRetired();
+                }
+            });
+        }
+
+        private void dropIfRetired() {
+            if (retired.get() && subscribed.get() && dropped.compareAndSet(false, true)) {
+                broker.unsubscribe(topic, handler);
+            }
+        }
+    }
+
+    /**
+     * Retires the handler of a timed-out operation, also when a later operation of the topic superseded its
+     * bookkeeping, unless that operation installed another handler already.
+     * The broker may still hold the handler, and it must not deliver to the subscription that replaces it.
+     */
+    private void retireOnTimeout(BrokerSubscription subscription, TopicMessageHandler<T> handler, Throwable failure) {
+        if (failure != null && timedOut(failure) && subscription.handler == handler) {
+            subscription.handler = null;
+        }
+    }
+
+    private static boolean timedOut(Throwable failure) {
+        Throwable cause = failure instanceof CompletionException && failure.getCause() != null ? failure.getCause() : failure;
+        return cause instanceof TimeoutException;
     }
 
     /**
@@ -341,7 +419,11 @@ public class WebSocketServer<T, D> {
                 result = subscription.settled;
             } else {
                 TopicBroker<T> broker = topicBroker;
-                operation = prepareBrokerOperation(topic, () -> broker.subscribe(topic, topicMessageHandler));
+                TopicMessageHandler<T> handler = newTopicMessageHandler(subscription);
+                subscription.handler = handler;
+                SubscribeAttempt brokerAttempt = new SubscribeAttempt(broker, topic, handler);
+                operation = prepareBrokerOperation(topic, brokerAttempt::subscribe);
+                brokerAttempt.retireOnFailure(operation);
                 result = trackBrokerTransition(
                     topic,
                     subscription,
@@ -349,7 +431,8 @@ public class WebSocketServer<T, D> {
                     BrokerSubscriptionStatus.SUBSCRIBING,
                     BrokerSubscriptionStatus.SUBSCRIBED,
                     BrokerSubscriptionStatus.UNSUBSCRIBED,
-                    broker
+                    broker,
+                    () -> handler
                 );
             }
         }
@@ -363,7 +446,11 @@ public class WebSocketServer<T, D> {
                     sessionTopicRegistry.unsubscribe(session, topic, attempt);
                     BrokerSubscription subscription = brokerSubscriptions.get(topic);
 
-                    if (subscription != null && subscription.transition == null && !sessionTopicRegistry.hasSubscribers(topic)) {
+                    // A later attempt may have subscribed the broker meanwhile, and a failed unsubscribe keeps it subscribed
+                    if (subscription != null
+                        && subscription.status == BrokerSubscriptionStatus.UNSUBSCRIBED
+                        && subscription.transition == null
+                        && !sessionTopicRegistry.hasSubscribers(topic)) {
                         brokerSubscriptions.remove(topic, subscription);
                     }
                 }
@@ -480,16 +567,16 @@ public class WebSocketServer<T, D> {
      * write to every subscriber itself. The task is queued even on the current event loop, so each subscriber
      * receives the messages of a topic in the order of the broker.
      *
-     * @param topic   the topic of the message.
-     * @param message the message.
+     * @param subscribers the subscribers of the topic.
+     * @param message     the message.
      */
-    private void handleTopicMessage(String topic, T message) {
+    private void handleTopicMessage(Collection<WebSocketSession<T, D>> subscribers, T message) {
         Map<EventExecutor, List<WebSocketSession<T, D>>> subscribersByLoop = new HashMap<>();
 
         // Encoded once for all subscribers, a failure fails the delivery instead of every connection
         byte[] payload = encode(message);
 
-        for (WebSocketSession<T, D> session : sessionTopicRegistry.getSubscribers(topic)) {
+        for (WebSocketSession<T, D> session : subscribers) {
             subscribersByLoop.computeIfAbsent(session.getChannelContext().executor(), _ -> new ArrayList<>()).add(session);
         }
 
@@ -508,31 +595,37 @@ public class WebSocketServer<T, D> {
         BrokerSubscription subscription
     ) {
         CompletionStage<Void> unsubscribing = subscription.transition;
-        TopicBroker<T> subscribedBroker = subscription.broker;
         TopicBroker<T> broker = topicBroker;
+        TopicMessageHandler<T> handler = newTopicMessageHandler(subscription);
         AtomicBoolean unsubscribeFailed = new AtomicBoolean();
+        SubscribeAttempt attempt = new SubscribeAttempt(broker, topic, handler);
         PendingBrokerOperation operation = prepareBrokerOperation(topic,
             () -> unsubscribing.handle((_, failure) -> failure)
                 .thenCompose(failure -> {
-                    if (failure != null) {
+                    // A failed unsubscribe keeps the broker and handler it worked on subscribed, which the subscription
+                    // still holds, a timed-out one may still remove the handler later
+                    if (failure != null && !timedOut(failure)) {
                         unsubscribeFailed.set(true);
-                        synchronized (sessionTopicLock) {
-                            subscription.broker = subscribedBroker;
-                        }
                         return CompletableFuture.completedFuture(null);
                     }
-                    return broker.subscribe(topic, topicMessageHandler)
+                    synchronized (sessionTopicLock) {
+                        subscription.handler = handler;
+                    }
+                    return attempt.subscribe()
                         .thenRun(() -> {
                             synchronized (sessionTopicLock) {
                                 subscription.broker = broker;
                             }
                         });
                 }));
+        attempt.retireOnFailure(operation);
 
         subscription.status = BrokerSubscriptionStatus.SUBSCRIBING;
         subscription.transition = operation.result;
         subscription.settled = operation.result.whenComplete((_, failure) -> {
             synchronized (sessionTopicLock) {
+                retireOnTimeout(subscription, handler, failure);
+
                 if (subscription.transition != operation.result) {
                     return;
                 }
@@ -543,9 +636,12 @@ public class WebSocketServer<T, D> {
                     ? BrokerSubscriptionStatus.SUBSCRIBED
                     : BrokerSubscriptionStatus.UNSUBSCRIBED;
 
-                subscription.broker = failure == null
-                    ? (unsubscribeFailed.get() ? subscribedBroker : broker)
-                    : null;
+                if (failure != null) {
+                    subscription.broker = null;
+                    subscription.handler = null;
+                } else if (!unsubscribeFailed.get()) {
+                    subscription.broker = broker;
+                }
             }
         });
         return operation;
@@ -564,7 +660,9 @@ public class WebSocketServer<T, D> {
         }
 
         TopicBroker<T> broker = subscription.broker;
-        Supplier<CompletionStage<Void>> invocation = getCompletionStageSupplier(topic, subscription, broker);
+        // The handler the unsubscribe works on is known once it runs, an earlier resubscribe may install another one
+        AtomicReference<TopicMessageHandler<T>> handler = new AtomicReference<>();
+        Supplier<CompletionStage<Void>> invocation = getCompletionStageSupplier(topic, subscription, broker, handler);
         PendingBrokerOperation operation = prepareBrokerOperation(topic, invocation);
 
         CompletionStage<Void> result = trackBrokerTransition(
@@ -574,7 +672,8 @@ public class WebSocketServer<T, D> {
             BrokerSubscriptionStatus.UNSUBSCRIBING,
             BrokerSubscriptionStatus.UNSUBSCRIBED,
             BrokerSubscriptionStatus.SUBSCRIBED,
-            broker
+            broker,
+            handler::get
         );
 
         return new BrokerTransition(result, operation);
@@ -583,14 +682,16 @@ public class WebSocketServer<T, D> {
     private Supplier<CompletionStage<Void>> getCompletionStageSupplier(
         String topic,
         BrokerSubscription subscription,
-        TopicBroker<T> broker
+        TopicBroker<T> broker,
+        AtomicReference<TopicMessageHandler<T>> handler
     ) {
         CompletionStage<Void> subscribing = subscription.status == BrokerSubscriptionStatus.SUBSCRIBING
             ? subscription.transition
             : null;
 
         if (subscribing == null) {
-            return () -> broker.unsubscribe(topic, topicMessageHandler);
+            handler.set(subscription.handler);
+            return () -> broker.unsubscribe(topic, handler.get());
         }
 
         return () -> subscribing.handle((_, failure) -> failure).thenCompose(failure -> {
@@ -599,11 +700,14 @@ public class WebSocketServer<T, D> {
             }
 
             TopicBroker<T> activeBroker;
+            TopicMessageHandler<T> activeHandler;
 
             synchronized (sessionTopicLock) {
                 activeBroker = subscription.broker;
+                activeHandler = subscription.handler;
             }
-            return activeBroker.unsubscribe(topic, topicMessageHandler);
+            handler.set(activeHandler);
+            return activeBroker.unsubscribe(topic, activeHandler);
         });
     }
 
@@ -614,7 +718,8 @@ public class WebSocketServer<T, D> {
         BrokerSubscriptionStatus pendingStatus,
         BrokerSubscriptionStatus successStatus,
         BrokerSubscriptionStatus failureStatus,
-        TopicBroker<T> broker
+        TopicBroker<T> broker,
+        Supplier<TopicMessageHandler<T>> handler
     ) {
         subscription.status = pendingStatus;
         subscription.transition = transition;
@@ -622,15 +727,22 @@ public class WebSocketServer<T, D> {
 
         subscription.settled = transition.whenComplete((_, failure) -> {
             synchronized (sessionTopicLock) {
+                retireOnTimeout(subscription, handler.get(), failure);
+
                 if (subscription.transition != transition) {
                     return;
                 }
 
-                subscription.status = failure == null ? successStatus : failureStatus;
+                // After a timeout the broker may still complete the operation, so the subscription is forgotten
+                // and subscribed again with a new handler when needed
+                subscription.status = failure == null
+                    ? successStatus
+                    : timedOut(failure) ? BrokerSubscriptionStatus.UNSUBSCRIBED : failureStatus;
                 subscription.transition = null;
 
                 if (subscription.status == BrokerSubscriptionStatus.UNSUBSCRIBED) {
                     subscription.broker = null;
+                    subscription.handler = null;
 
                     if (!sessionTopicRegistry.hasSubscribers(topic)) {
                         brokerSubscriptions.remove(topic, subscription);
@@ -721,6 +833,7 @@ public class WebSocketServer<T, D> {
         // The transition once its bookkeeping ran, what callers wait for
         private CompletableFuture<Void> settled;
         private TopicBroker<T> broker;
+        private TopicMessageHandler<T> handler;
     }
 
     private record BrokerTransition(CompletionStage<Void> result, PendingBrokerOperation operation) {
