@@ -236,14 +236,24 @@ class SslTest {
             .configure(configurer -> configurer.setMaxConcurrentTlsHandshakes(1))
             .listen(0);
 
-        // A client that sends no ClientHello keeps its TLS handshake in progress
-        try (Socket pending = new Socket("127.0.0.1", server.getLocalAddress().getPort());
-             Socket rejected = new Socket("127.0.0.1", server.getLocalAddress().getPort())) {
-            pending.setSoTimeout(500);
-            rejected.setSoTimeout(2000);
+        // Clients that send no ClientHello keep their TLS handshake in progress. The event loops accept the
+        // connections in either order, so one of them takes the slot and the other one is closed.
+        try (Socket first = new Socket("127.0.0.1", server.getLocalAddress().getPort());
+             Socket second = new Socket("127.0.0.1", server.getLocalAddress().getPort())) {
+            int closed = 0;
 
-            assertThat(rejected.getInputStream().read()).as("Connection past the limit should be closed").isEqualTo(-1);
-            assertThatThrownBy(() -> pending.getInputStream().read()).as("Pending handshake should stay open").isInstanceOf(SocketTimeoutException.class);
+            for (Socket socket : List.of(first, second)) {
+                socket.setSoTimeout(2000);
+                try {
+                    if (socket.getInputStream().read() == -1) {
+                        closed++;
+                    }
+                } catch (SocketTimeoutException exception) {
+                    // The pending handshake stays open
+                }
+            }
+
+            assertThat(closed).as("Exactly one connection should be past the limit").isEqualTo(1);
         }
     }
 

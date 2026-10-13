@@ -171,7 +171,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             try {
                 write = messageSender.apply(message, context);
             } catch (RuntimeException exception) {
-                write = context.channel().newFailedFuture(exception);
+                // The encoder failed, a server failure whatever the type of the exception
+                if (!closeHandled && context.channel().isActive()) {
+                    handleCallbackFailure(context, exception);
+                }
+                return context.channel().newFailedFuture(exception);
             }
 
             write.addListener(result -> {
@@ -415,17 +419,6 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         notifyErrorHandler(cause);
         notifyObserver(observer -> observer.exception(openedSession, cause));
 
-        // A compressed message that cannot be inflated fails the connection. Netty reports corrupted data
-        // with the inflater's DataFormatException as the cause, and a message inflating past maxMessageSize without one.
-        if (cause instanceof DecompressionException) {
-            WebSocketCloseStatus status = cause.getCause() instanceof DataFormatException
-                ? WebSocketCloseStatus.INVALID_PAYLOAD_DATA
-                : WebSocketCloseStatus.MESSAGE_TOO_BIG;
-
-            context.writeAndFlush(new CloseWebSocketFrame(status)).addListener(ChannelFutureListener.CLOSE);
-            return;
-        }
-
         if (clientFailure) {
             LOGGER.debug("Client failure in channel with id {}: {}", context.channel().id(), cause.toString());
         } else {
@@ -436,13 +429,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         // The close frame then passes OutboundCloseInfoHandler, so onClose reports its status instead of 1006
         // and a client that does not read cannot keep the close frame and the connection pending.
         // Other decoding failures of an open session, e.g. of the compression decoder, leave its state broken too.
-        // An application callback throwing such an exception is still a server failure.
+        // An application callback or encoder throwing such an exception is still a server failure.
         if (clientFailure && (cause instanceof CorruptedWebSocketFrameException || cause instanceof DecoderException && openedSession != null)) {
             // A close frame sent before, e.g. 1007 by the UTF-8 validator, closes the connection once it is written
             if (!ClosingHandshake.isClosing(context.channel())) {
-                WebSocketCloseStatus status = cause instanceof CorruptedWebSocketFrameException violation
-                    ? violation.closeStatus()
-                    : WebSocketCloseStatus.PROTOCOL_ERROR;
+                WebSocketCloseStatus status = protocolViolationStatus(cause);
                 String reason = cause instanceof CorruptedWebSocketFrameException && cause.getMessage() != null
                     ? cause.getMessage()
                     : status.reasonText();
@@ -463,6 +454,25 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         } else {
             context.close();
         }
+    }
+
+    /**
+     * Returns the close status for a protocol violation of the client.
+     * A compressed message that cannot be inflated is reported with the inflater's DataFormatException as the cause,
+     * and a message inflating past maxMessageSize without one.
+     *
+     * @param cause the decoding failure.
+     * @return the close status.
+     */
+    private static WebSocketCloseStatus protocolViolationStatus(Throwable cause) {
+        if (cause instanceof DecompressionException) {
+            return cause.getCause() instanceof DataFormatException
+                ? WebSocketCloseStatus.INVALID_PAYLOAD_DATA
+                : WebSocketCloseStatus.MESSAGE_TOO_BIG;
+        }
+        return cause instanceof CorruptedWebSocketFrameException violation
+            ? violation.closeStatus()
+            : WebSocketCloseStatus.PROTOCOL_ERROR;
     }
 
     /**

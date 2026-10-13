@@ -5,6 +5,7 @@ import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderException;
+import io.netty.handler.codec.compression.DecompressionException;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.CorruptedWebSocketFrameException;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
@@ -27,6 +28,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.zip.DataFormatException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -89,6 +91,35 @@ class FailureHandlingTest {
 
         assertThatCode(() -> connection.session().sendMessage("message"))
             .doesNotThrowAnyException();
+
+        assertFailureWasReportedAndSessionClosedWithStatus(connection, failure, closeOnException, WebSocketCloseStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void shouldTreatDecoderExceptionFromEncoderAsServerFailure(boolean closeOnException) {
+        // Netty's type, which marks a client failure when the frame decoder throws it
+        DecoderException failure = new DecoderException("encoder failed");
+        TestConnection connection = connect(closeOnException, configurer -> configurer.setMessageEncoder(_ -> {
+            throw failure;
+        }));
+
+        CompletableFuture<Void> send = connection.session().sendMessageAsync("message").toCompletableFuture();
+
+        assertSendFailedWith(send, failure);
+        assertFailureWasReportedAndSessionClosedWithStatus(connection, failure, closeOnException, WebSocketCloseStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void shouldTreatDecompressionExceptionFromMessageHandlerAsServerFailure(boolean closeOnException) {
+        // Netty's type, which closes with 1007 or 1009 when the compression decoder throws it
+        DecompressionException failure = new DecompressionException("handler failed", new DataFormatException());
+        TestConnection connection = connect(closeOnException, _ -> {}, (_, _) -> {
+            throw failure;
+        });
+
+        Util.sendFromClient(connection.channel(), new TextWebSocketFrame("message"));
 
         assertFailureWasReportedAndSessionClosedWithStatus(connection, failure, closeOnException, WebSocketCloseStatus.INTERNAL_SERVER_ERROR);
     }
