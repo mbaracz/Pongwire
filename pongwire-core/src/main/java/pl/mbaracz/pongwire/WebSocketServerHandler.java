@@ -878,11 +878,6 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
             // The upgrade handler may run past the deadline, and cancelling the overdue timeout would keep the connection
             if (it.isSuccess() && handshakeTimeout != null && handshakeTimeout.getDelay(TimeUnit.NANOSECONDS) <= 0) {
                 context.close();
-            } else if (it.isSuccess() && webSocketServer.isStopping()) {
-                // The handshake completed after stop() took its snapshot of the sessions to close
-                cancelHandshakeTimeout();
-                context.writeAndFlush(new CloseWebSocketFrame(WebSocketCloseStatus.ENDPOINT_UNAVAILABLE))
-                    .addListener(ChannelFutureListener.CLOSE);
             } else if (it.isSuccess()) {
                 cancelHandshakeTimeout();
                 // Netty inserts the encoder before its decoder. Intercept closes between them so
@@ -900,7 +895,13 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                     new FlushConsolidationHandler()
                 );
                 session.setSubprotocol(handshaker.selectedSubprotocol());
-                webSocketServer.addSession(session);
+
+                // The handshake completed after stop() took its snapshot of the sessions to close, or the server stopped
+                if (!webSocketServer.addSession(session)) {
+                    context.writeAndFlush(new CloseWebSocketFrame(WebSocketCloseStatus.ENDPOINT_UNAVAILABLE))
+                        .addListener(ChannelFutureListener.CLOSE);
+                    return;
+                }
                 openedSession = session;
                 // The channel may already be unwritable, with no later writability change to start the timeout
                 updateUnwritableTimeout(context.channel());

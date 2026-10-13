@@ -70,6 +70,8 @@ public class WebSocketServer<T, D> {
     private volatile State state = State.STOPPED;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
+    // Event loops of a stopped run that did not terminate in time, their channels still use the registries
+    private List<EventLoopGroup> retiredGroups = List.of();
     private volatile Channel serverChannel;
 
     private volatile TopicBroker<T> topicBroker = new InMemoryTopicBroker<>();
@@ -724,7 +726,8 @@ public class WebSocketServer<T, D> {
      *
      * @param port Port number to listen on
      * @return The WebSocket server instance for method chaining
-     * @throws IllegalStateException    If the server is already running or still stopping, message encoder/decoder
+     * @throws IllegalStateException    If the server is already running or still stopping, the event loops of the
+     *                                  previous run have not terminated, message encoder/decoder
      *                                  was not provided or the server could not be bound to the port
      * @throws IllegalArgumentException If the port is outside the valid range, or the TLS certificate chain or private key
      *                                  cannot be read or do not match. Each call reads the files again, so a restart
@@ -746,6 +749,9 @@ public class WebSocketServer<T, D> {
             }
             if (configuration.getMessageEncoder() == null) {
                 throw new IllegalStateException("Message encoder is not provided, cannot start the server!");
+            }
+            if (retiredGroups.stream().anyMatch(group -> !group.isTerminated())) {
+                throw new IllegalStateException("Event loops of the previous run are still terminating, a callback may be blocking them!");
             }
 
             // Reads the TLS files before any event loop is created, so invalid files fail fast
@@ -772,6 +778,7 @@ public class WebSocketServer<T, D> {
                 bossGroup = boss;
                 workerGroup = worker;
                 serverChannel = bindFuture.channel();
+                sessionRegistry.startAccepting();
                 state = State.RUNNING;
                 started = true;
             } finally {
@@ -845,7 +852,9 @@ public class WebSocketServer<T, D> {
         } finally {
             // Release the event loops and leave STOPPING even if closing the connections failed
             try {
-                shutdownGracefully(boss, worker);
+                if (!shutdownGracefully(boss, worker)) {
+                    retiredGroups = List.of(boss, worker);
+                }
                 settleBrokerState();
             } finally {
                 synchronized (lifecycleLock) {
@@ -896,7 +905,8 @@ public class WebSocketServer<T, D> {
         List<ChannelFuture> closeFutures = new ArrayList<>();
         Duration closeTimeout = configuration.getCloseTimeout();
 
-        for (WebSocketSession<T, D> session : sessionRegistry.snapshot()) {
+        // A handshake completing from now on is refused, so no session misses the close frame
+        for (WebSocketSession<T, D> session : sessionRegistry.stopAccepting()) {
             Channel channel = session.getChannelContext().channel();
             CloseWebSocketFrame closeFrame = new CloseWebSocketFrame(WebSocketCloseStatus.ENDPOINT_UNAVAILABLE);
 
@@ -920,8 +930,12 @@ public class WebSocketServer<T, D> {
     /**
      * Shuts down the event loop groups and waits for them to terminate, skipping groups that were not created.
      * No quiet period is needed, sessions are already closed and the shutdown closes any remaining connections.
+     *
+     * @return false if a group did not terminate within the timeout.
      */
-    private static void shutdownGracefully(EventLoopGroup... groups) {
+    private static boolean shutdownGracefully(EventLoopGroup... groups) {
+        boolean terminated = true;
+
         for (EventLoopGroup group : groups) {
             if (group != null) {
                 group.shutdownGracefully(0, SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -932,8 +946,10 @@ public class WebSocketServer<T, D> {
             // A callback blocking an event loop would otherwise keep stop() waiting forever
             if (group != null && !group.terminationFuture().awaitUninterruptibly(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 LOGGER.warn("Event loops did not terminate within {} seconds, a callback may be blocking them", SHUTDOWN_TIMEOUT_SECONDS);
+                terminated = false;
             }
         }
+        return terminated;
     }
 
     private static boolean isEventLoopThread(EventLoopGroup... groups) {
@@ -1098,9 +1114,10 @@ public class WebSocketServer<T, D> {
      * Adds a WebSocket session associated with its channel ID.
      *
      * @param session The WebSocket session to add
+     * @return false if stop() already took the sessions to close, then the session is not added
      */
-    void addSession(WebSocketSession<T, D> session) {
-        sessionRegistry.register(session);
+    boolean addSession(WebSocketSession<T, D> session) {
+        return sessionRegistry.register(session);
     }
 
     /**

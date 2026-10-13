@@ -31,6 +31,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Stream;
@@ -679,6 +680,33 @@ class WebSocketServerTest {
         ByteBuf response = rejected.readOutbound();
         assertThat(response.toString(StandardCharsets.US_ASCII)).as("New handshake should be rejected").startsWith("HTTP/1.1 503");
         response.release();
+    }
+
+    @Test
+    void shouldRefuseSessionWhoseHandshakeCompletesAfterServerStopped() {
+        List<WebSocketSession<String, Object>> opened = new ArrayList<>();
+        server.onOpen(opened::add).listen(0);
+
+        // A handshake whose 101 response is still being written when the server stops
+        EmbeddedChannel late = Util.newEmbeddedChannel(DefaultChannelId.newInstance(), new WebSocketServerChannelInitializer<>(server));
+        AtomicBoolean holdFlush = new AtomicBoolean(true);
+        late.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+                if (!holdFlush.get()) {
+                    context.flush();
+                }
+            }
+        });
+        Util.performHandshake(late, "/");
+        server.stop();
+
+        holdFlush.set(false);
+        late.flush();
+
+        assertThat(opened).as("No session should open on a stopped server").isEmpty();
+        assertThat(server.getConnectedSessions()).as("Connected sessions").isEmpty();
+        assertThat(late.isOpen()).as("Late connection should be closed").isFalse();
     }
 
     private EmbeddedChannel connectWithUniqueId() {
