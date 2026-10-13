@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -315,6 +316,40 @@ class TopicBrokerTest {
         assertThat(subscribe).as("Subscribe should fail").isCompletedExceptionally();
         assertThat(server.isSubscribed(session, "topic")).as("Session should not stay subscribed").isFalse();
         assertThat(server.getTopics()).as("Topic should not stay registered").isEmpty();
+    }
+
+    @Test
+    void shouldRollBackOnlyFailedAttemptWhenSessionSubscribedAgainMeanwhile() {
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        CompletableFuture<Void> first = new CompletableFuture<>();
+        broker.subscribeResult = first;
+
+        // The session unsubscribes and subscribes again while the first broker subscription is pending
+        CompletableFuture<Void> firstSubscribe = server.subscribe(session, "topic").toCompletableFuture();
+        server.unsubscribe(session, "topic");
+        broker.subscribeResult = CompletableFuture.completedFuture(null);
+        CompletableFuture<Void> secondSubscribe = server.subscribe(session, "topic").toCompletableFuture();
+        first.completeExceptionally(new IllegalStateException("broker unavailable"));
+
+        assertThat(firstSubscribe).as("First subscribe").isCompletedExceptionally();
+        assertThat(secondSubscribe).as("Second subscribe").succeedsWithin(5, TimeUnit.SECONDS);
+        assertThat(server.isSubscribed(session, "topic")).as("The second attempt should keep its membership").isTrue();
+        assertThat(broker.calls).as("Broker calls").containsExactly("subscribe topic", "subscribe topic");
+    }
+
+    @Test
+    void shouldCompleteSubscribeStageAfterRollingBackFailedSubscription() {
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
+        CompletableFuture<Void> pending = new CompletableFuture<>();
+        broker.subscribeResult = pending;
+        AtomicBoolean subscribedWhenFailed = new AtomicBoolean(true);
+
+        server.subscribe(session, "topic").whenComplete((_, _) -> subscribedWhenFailed.set(server.isSubscribed(session, "topic")));
+        pending.completeExceptionally(new IllegalStateException("broker unavailable"));
+
+        assertThat(subscribedWhenFailed).as("The failure continuation should see the session unsubscribed").isFalse();
     }
 
     @Test

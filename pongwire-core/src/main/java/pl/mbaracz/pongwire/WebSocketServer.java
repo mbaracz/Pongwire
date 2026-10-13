@@ -318,13 +318,14 @@ public class WebSocketServer<T, D> {
     public CompletionStage<Void> subscribe(WebSocketSession<T, D> session, String topic) {
         PendingBrokerOperation operation = null;
         CompletionStage<Void> result;
+        long attempt;
 
         synchronized (sessionTopicLock) {
             if (!sessionRegistry.contains(session)) {
                 return readOnly(CompletableFuture.failedFuture(new IllegalStateException("WebSocket session is not connected")));
             }
 
-            sessionTopicRegistry.subscribe(session, topic);
+            attempt = sessionTopicRegistry.subscribe(session, topic);
 
             BrokerSubscription subscription = brokerSubscriptions.computeIfAbsent(
                 topic,
@@ -334,10 +335,10 @@ public class WebSocketServer<T, D> {
             if (subscription.status == BrokerSubscriptionStatus.SUBSCRIBED) {
                 return readOnly(CompletableFuture.completedFuture(null));
             } else if (subscription.status == BrokerSubscriptionStatus.SUBSCRIBING) {
-                result = subscription.transition;
+                result = subscription.settled;
             } else if (subscription.status == BrokerSubscriptionStatus.UNSUBSCRIBING) {
                 operation = prepareBrokerSubscribeAfterUnsubscribe(topic, subscription);
-                result = operation.result;
+                result = subscription.settled;
             } else {
                 TopicBroker<T> broker = topicBroker;
                 operation = prepareBrokerOperation(topic, () -> broker.subscribe(topic, topicMessageHandler));
@@ -353,11 +354,13 @@ public class WebSocketServer<T, D> {
             }
         }
 
-        // A failed broker subscription leaves the session unsubscribed, so the failed stage tells the whole truth
-        result.whenComplete((_, failure) -> {
+        // A failed broker subscription leaves the session unsubscribed, so the failed stage tells the whole truth.
+        // The caller's stage completes after the rollback and the broker state settled, so its continuations see them.
+        CompletionStage<Void> settled = result.whenComplete((_, failure) -> {
             if (failure != null) {
                 synchronized (sessionTopicLock) {
-                    sessionTopicRegistry.unsubscribe(session, topic);
+                    // Only the membership of this attempt, a later subscribe of the session may own it now
+                    sessionTopicRegistry.unsubscribe(session, topic, attempt);
                     BrokerSubscription subscription = brokerSubscriptions.get(topic);
 
                     if (subscription != null && subscription.transition == null && !sessionTopicRegistry.hasSubscribers(topic)) {
@@ -369,7 +372,7 @@ public class WebSocketServer<T, D> {
 
         start(operation);
 
-        return readOnly(result);
+        return readOnly(settled);
     }
 
     /**
@@ -528,7 +531,7 @@ public class WebSocketServer<T, D> {
 
         subscription.status = BrokerSubscriptionStatus.SUBSCRIBING;
         subscription.transition = operation.result;
-        operation.result.whenComplete((_, failure) -> {
+        subscription.settled = operation.result.whenComplete((_, failure) -> {
             synchronized (sessionTopicLock) {
                 if (subscription.transition != operation.result) {
                     return;
@@ -617,7 +620,7 @@ public class WebSocketServer<T, D> {
         subscription.transition = transition;
         subscription.broker = broker;
 
-        transition.whenComplete((_, failure) -> {
+        subscription.settled = transition.whenComplete((_, failure) -> {
             synchronized (sessionTopicLock) {
                 if (subscription.transition != transition) {
                     return;
@@ -635,7 +638,7 @@ public class WebSocketServer<T, D> {
                 }
             }
         });
-        return transition;
+        return subscription.settled;
     }
 
     /**
@@ -715,6 +718,8 @@ public class WebSocketServer<T, D> {
 
         private BrokerSubscriptionStatus status = BrokerSubscriptionStatus.UNSUBSCRIBED;
         private CompletableFuture<Void> transition;
+        // The transition once its bookkeeping ran, what callers wait for
+        private CompletableFuture<Void> settled;
         private TopicBroker<T> broker;
     }
 

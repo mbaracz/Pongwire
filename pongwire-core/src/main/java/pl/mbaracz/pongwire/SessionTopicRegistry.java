@@ -15,27 +15,49 @@ final class SessionTopicRegistry<T, D> {
 
     private final Map<String, Set<WebSocketSession<T, D>>> topics = new HashMap<>();
 
-    // The topics of each session, so a closing session is removed only from its own topics
-    private final Map<WebSocketSession<T, D>, Set<String>> sessionTopics = new HashMap<>();
+    // The topics of each session with the attempt that subscribed them, so a closing session is removed
+    // only from its own topics and a failed attempt rolls back only its own membership
+    private final Map<WebSocketSession<T, D>, Map<String, Long>> sessionTopics = new HashMap<>();
+    private long attempts;
 
     // Subscribers of each topic as returned to publishers, rebuilt only after the subscriptions of the topic change
     private final Map<String, List<WebSocketSession<T, D>>> subscriberSnapshots = new HashMap<>();
 
-    synchronized void subscribe(WebSocketSession<T, D> session, String topic) {
+    /**
+     * Subscribes the session to the topic.
+     *
+     * @return the attempt that owns the membership, for {@link #unsubscribe(WebSocketSession, String, long)}.
+     */
+    synchronized long subscribe(WebSocketSession<T, D> session, String topic) {
         Objects.requireNonNull(session, "WebSocket session must not be null!");
         Objects.requireNonNull(topic, "Topic must not be null!");
+        long attempt = ++attempts;
 
         if (topics.computeIfAbsent(topic, _ -> new HashSet<>()).add(session)) {
-            sessionTopics.computeIfAbsent(session, _ -> new HashSet<>()).add(topic);
             subscriberSnapshots.remove(topic);
         }
+        sessionTopics.computeIfAbsent(session, _ -> new HashMap<>()).put(topic, attempt);
+        return attempt;
     }
 
     synchronized void unsubscribe(WebSocketSession<T, D> session, String topic) {
-        Objects.requireNonNull(topic, "Topic must not be null!");
-        Set<String> subscribedTopics = sessionTopics.get(session);
+        unsubscribe(session, topic, 0);
+    }
 
-        if (subscribedTopics != null && subscribedTopics.remove(topic)) {
+    /**
+     * Unsubscribes the session from the topic, unless a later attempt subscribed it again meanwhile.
+     *
+     * @param attempt the attempt that subscribed the session, or 0 to unsubscribe whatever the attempt.
+     */
+    synchronized void unsubscribe(WebSocketSession<T, D> session, String topic, long attempt) {
+        Objects.requireNonNull(topic, "Topic must not be null!");
+        Map<String, Long> subscribedTopics = sessionTopics.get(session);
+
+        if (subscribedTopics == null || attempt != 0 && !Long.valueOf(attempt).equals(subscribedTopics.get(topic))) {
+            return;
+        }
+
+        if (subscribedTopics.remove(topic) != null) {
             if (subscribedTopics.isEmpty()) {
                 sessionTopics.remove(session);
             }
@@ -51,11 +73,11 @@ final class SessionTopicRegistry<T, D> {
      * @return the topics left without subscribers.
      */
     synchronized Set<String> unsubscribeAll(WebSocketSession<T, D> session) {
-        Set<String> subscribedTopics = sessionTopics.remove(session);
+        Map<String, Long> subscribedTopics = sessionTopics.remove(session);
         Set<String> emptyTopics = new HashSet<>();
 
         if (subscribedTopics != null) {
-            for (String topic : subscribedTopics) {
+            for (String topic : subscribedTopics.keySet()) {
                 if (removeSubscriber(session, topic)) {
                     emptyTopics.add(topic);
                 }
