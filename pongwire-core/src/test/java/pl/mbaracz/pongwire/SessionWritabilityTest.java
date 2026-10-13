@@ -1,6 +1,7 @@
 package pl.mbaracz.pongwire;
 
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -236,5 +237,26 @@ class SessionWritabilityTest {
 
         advanceTime(channel, 10);
         assertThat(channel.isOpen()).as("Buffer without progress should close the connection").isFalse();
+    }
+
+    @Test
+    void shouldRestartUnwritableTimeoutWhenTransportTakesPartOfTheCurrentMessage() {
+        EmbeddedChannel channel = connectSlowClient(Duration.ofSeconds(10));
+        ChannelOutboundBuffer buffer = channel.unsafe().outboundBuffer();
+
+        // The message is flushed to the transport, which takes it in parts over several timeouts
+        buffer.addFlush();
+        advanceTime(channel, 5);
+        buffer.progress(1000);
+        advanceTime(channel, 5);
+        assertThat(channel.isOpen()).as("A partly written message should start a new timeout").isTrue();
+
+        advanceTime(channel, 5);
+        buffer.progress(1000);
+        advanceTime(channel, 5);
+        assertThat(channel.isOpen()).as("Further progress should start another timeout").isTrue();
+
+        advanceTime(channel, 10);
+        assertThat(channel.isOpen()).as("A message without progress should close the connection").isFalse();
     }
 }

@@ -1210,9 +1210,14 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         }, timeout.toNanos(), TimeUnit.NANOSECONDS);
     }
 
+    /**
+     * Returns the bytes still to be written, counting the part of the current message the transport already took.
+     * A large message leaves the pending total unchanged until it is written completely, so without its progress a
+     * slow client reading it over several timeouts would be closed although the buffer drains.
+     */
     private static long pendingWriteBytes(Channel channel) {
         ChannelOutboundBuffer buffer = channel.unsafe().outboundBuffer();
-        return buffer == null ? 0 : buffer.totalPendingWriteBytes();
+        return buffer == null ? 0 : buffer.totalPendingWriteBytes() - buffer.currentProgress();
     }
 
     /**
