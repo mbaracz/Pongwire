@@ -1267,8 +1267,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                 // The next callbacks still run
                 reportCallbackFailure(context, failure);
             } finally {
+                // A terminated event loop reads nothing more, and the rejection must not escape the callback executor
                 if (pendingCallbacks.decrementAndGet() == maxPending / 2) {
-                    context.executor().execute(() -> resumeReading(context, maxPending));
+                    onEventLoop(context, () -> resumeReading(context, maxPending), () -> {});
                 }
             }
         }, exception -> {

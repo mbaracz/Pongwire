@@ -9,15 +9,21 @@ import org.junit.jupiter.api.Timeout;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageEncoder;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.WebSocket;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class CallbackExecutorTest {
 
@@ -249,5 +255,101 @@ class CallbackExecutorTest {
         executor.execute(() -> {}, _ -> {});
         release.countDown();
         worker.join();
+    }
+
+    @Test
+    void shouldNotTreatFailureOfTaskRunOnCallingThreadAsRejection() {
+        RuntimeException failure = new IllegalStateException("task failed");
+        List<RejectedExecutionException> rejected = new ArrayList<>();
+        SerialExecutor executor = new SerialExecutor(Runnable::run);
+
+        assertThatThrownBy(() -> executor.execute(() -> {
+            throw failure;
+        }, rejected::add)).isSameAs(failure);
+        assertThat(rejected).as("A task that ran should not reach the rejection handler").isEmpty();
+    }
+
+    @Test
+    @Timeout(10)
+    void shouldDrainLargeBacklogWithoutRecursionWhenExecutorRunsTasksOnCallingThread() throws Exception {
+        int backlog = 200_000;
+        CountDownLatch running = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger executed = new AtomicInteger();
+        AtomicReference<Throwable> workerFailure = new AtomicReference<>();
+        SerialExecutor executor = new SerialExecutor(Runnable::run);
+        Thread worker = Thread.ofPlatform().uncaughtExceptionHandler((_, failure) -> workerFailure.set(failure)).start(() -> executor.execute(() -> {
+            running.countDown();
+            awaitQuietly(release, 5000);
+            executed.incrementAndGet();
+        }, _ -> {}));
+
+        assertThat(running.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // The worker drains the backlog once released, one stack frame per task would overflow its stack
+        for (int i = 0; i < backlog; i++) {
+            executor.execute(executed::incrementAndGet, _ -> {});
+        }
+        release.countDown();
+        worker.join();
+
+        assertThat(workerFailure.get()).as("Worker failure").isNull();
+        assertThat(executed.get()).as("Every task should run").isEqualTo(backlog + 1);
+    }
+
+    @Test
+    @Timeout(10)
+    void shouldRunEachCallbackOnceWhenEventLoopTerminatesWhileExecutorRunsTasksOnCallingThread() throws Exception {
+        Queue<Runnable> deferred = new ConcurrentLinkedQueue<>();
+        AtomicBoolean defer = new AtomicBoolean(true);
+        List<String> events = new CopyOnWriteArrayList<>();
+        CountDownLatch received = new CountDownLatch(3);
+
+        // Holds the first callback like a busy pool, then runs the callbacks on the calling thread like caller-runs
+        server
+            .configure(configurer -> configurer
+                .setCallbackExecutor(task -> {
+                    if (defer.get()) {
+                        deferred.add(task);
+                    } else {
+                        task.run();
+                    }
+                })
+                .setMaxPendingCallbacks(4)
+            )
+            .onMessage((_, message) -> events.add("message " + message))
+            .onClose((_, _, _) -> events.add("close"))
+            .observer(new WebSocketServerObserver<>() {
+                @Override
+                public void messageReceived(WebSocketSession<String, Object> session) {
+                    received.countDown();
+                }
+            });
+        server.listen(0);
+        HttpClient client = HttpClient.newBuilder().build();
+
+        try {
+            WebSocket webSocket = client.newWebSocketBuilder()
+                .buildAsync(URI.create("ws://127.0.0.1:" + server.getLocalAddress().getPort()), new WebSocket.Listener() {
+                })
+                .get(5, TimeUnit.SECONDS);
+
+            for (int i = 1; i <= 3; i++) {
+                webSocket.sendText("" + i, true).get(5, TimeUnit.SECONDS);
+            }
+
+            // The three callbacks and the close callback are queued, then stop() terminates the event loops
+            assertThat(received.await(5, TimeUnit.SECONDS)).as("Messages should be received").isTrue();
+            server.stop();
+            defer.set(false);
+
+            // Resuming the reads after the second callback fails on the terminated event loop,
+            // which must not count as a rejection of the callbacks that already ran
+            deferred.remove().run();
+
+            assertThat(events).as("Every callback should run once").containsExactly("message 1", "message 2", "message 3", "close");
+        } finally {
+            client.shutdownNow();
+        }
     }
 }
