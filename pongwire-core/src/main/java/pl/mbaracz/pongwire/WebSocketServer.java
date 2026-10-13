@@ -80,7 +80,8 @@ public class WebSocketServer<T, D> {
     private final AtomicInteger connections = new AtomicInteger();
     private final Map<InetAddress, Integer> connectionsByAddress = new ConcurrentHashMap<>();
     private final SessionTopicRegistry<T, D> sessionTopicRegistry = new SessionTopicRegistry<>();
-    private final TopicMessageHandler<T> topicMessageHandler = this::handleTopicMessage;
+    // Replaced with the broker, so a handler a retired broker still holds after a failed unsubscribe delivers nothing
+    private volatile TopicMessageHandler<T> topicMessageHandler = newTopicMessageHandler();
     // Read without the lock by publish, changed only under sessionTopicLock
     private final Map<String, CompletableFuture<Void>> topicBrokerOperations = new ConcurrentHashMap<>();
     private final Map<String, BrokerSubscription> brokerSubscriptions = new HashMap<>();
@@ -253,16 +254,34 @@ public class WebSocketServer<T, D> {
                     );
                 }
 
+                if (this.topicBroker != topicBroker) {
+                    topicMessageHandler = newTopicMessageHandler();
+                }
                 this.topicBroker = topicBroker;
             }
         }
         return this;
     }
 
+    /**
+     * An operation that completed counts as finished although its bookkeeping callback may still be queued,
+     * because the completion wakes stop() before the callbacks run.
+     */
     private boolean hasActiveBrokerState() {
-        return !topicBrokerOperations.isEmpty()
+        return topicBrokerOperations.values().stream().anyMatch(operation -> !operation.isDone())
             || brokerSubscriptions.values().stream()
                 .anyMatch(subscription -> subscription.status != BrokerSubscriptionStatus.UNSUBSCRIBED);
+    }
+
+    private TopicMessageHandler<T> newTopicMessageHandler() {
+        return new TopicMessageHandler<>() {
+            @Override
+            public void onMessage(String topic, T message) {
+                if (topicMessageHandler == this) {
+                    handleTopicMessage(topic, message);
+                }
+            }
+        };
     }
 
     /**
@@ -891,9 +910,11 @@ public class WebSocketServer<T, D> {
             Thread.currentThread().interrupt();
         }
 
+        // A completed transition may not have run its bookkeeping callback yet, see hasActiveBrokerState()
         synchronized (sessionTopicLock) {
             brokerSubscriptions.entrySet().removeIf(entry ->
-                entry.getValue().transition == null && !sessionTopicRegistry.hasSubscribers(entry.getKey()));
+                (entry.getValue().transition == null || entry.getValue().transition.isDone())
+                    && !sessionTopicRegistry.hasSubscribers(entry.getKey()));
         }
     }
 

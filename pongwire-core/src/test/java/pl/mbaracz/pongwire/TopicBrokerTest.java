@@ -272,6 +272,27 @@ class TopicBrokerTest {
     }
 
     @Test
+    void shouldNotDeliverMessagesFromReplacedBrokerThatKeptItsHandler() {
+        server.listen(0);
+        EmbeddedChannel channel = Util.connect(server);
+        server.subscribe(server.getSessionByChannelId(channel.id()), "topic").toCompletableFuture().join();
+        TopicMessageHandler<String> retained = broker.handlers.getFirst();
+
+        // The broker fails to unsubscribe the closed session and keeps the handler
+        broker.unsubscribeResult = CompletableFuture.failedFuture(new IllegalStateException("broker closed"));
+        server.stop();
+        server.topicBroker(new RecordingTopicBroker()).listen(0);
+        EmbeddedChannel restarted = Util.connect(server);
+        server.subscribe(server.getSessionByChannelId(restarted.id()), "topic").toCompletableFuture().join();
+
+        retained.onMessage("topic", "stale");
+        restarted.runPendingTasks();
+
+        assertThat(Util.readFromServer(restarted)).as("The retired broker should deliver nothing").isNull();
+        server.stop();
+    }
+
+    @Test
     void shouldKeepTrackingBrokerOperationWhenCallerCompletesReturnedStage() {
         broker.publishResult = new CompletableFuture<>();
 
