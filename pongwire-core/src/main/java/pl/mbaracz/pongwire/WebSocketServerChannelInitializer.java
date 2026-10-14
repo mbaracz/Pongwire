@@ -10,8 +10,10 @@ import io.netty.channel.WriteBufferWaterMark;
 import io.netty.handler.codec.DecoderResult;
 import io.netty.handler.codec.http.HttpDecoderConfig;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.Utf8FrameValidator;
@@ -135,7 +137,18 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
 
         pipeline.addLast(new HttpServerCodec(httpConfig));
         // An upgrade request needs no body, so a body is not allowed to take more memory than the headers
-        pipeline.addLast(new HttpObjectAggregator(configuration.getMaxHandshakeHeaderSize()));
+        pipeline.addLast(new HttpObjectAggregator(configuration.getMaxHandshakeHeaderSize()) {
+            @Override
+            protected void handleOversizedMessage(ChannelHandlerContext context, HttpMessage oversized) throws Exception {
+                // Answered with 413 here, so the handler never sees the request and reports it to the observer
+                WebSocketServerObserver<T, D> observer = webSocketServer.getObserver();
+
+                if (observer != null) {
+                    observer.handshakeRejected(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE.code());
+                }
+                super.handleOversizedMessage(context, oversized);
+            }
+        });
 
         if (configuration.isCompressionEnabled()) {
             // Negotiates permessage-deflate during the handshake, then puts the compression encoder and decoder

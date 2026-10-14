@@ -69,6 +69,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
     private static final Logger LOGGER = LoggerFactory.getLogger(WebSocketServerHandler.class);
 
+    // A host name, an IPv4 address or a bracketed IPv6 address, with an optional port (RFC 3986, section 3.2.2)
+    private static final Pattern HOST = Pattern.compile("(\\[[0-9A-Fa-f:.]+]|[A-Za-z0-9._~%!$&'()*+,;=-]+)(:[0-9]*)?");
+
     private final BiFunction<Supplier<byte[]>, ChannelHandlerContext, ChannelFuture> messageSender;
     private final WebSocketServer<T, D> webSocketServer;
     private final ErrorHandler<T, D> errorHandler;
@@ -379,6 +382,15 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         handleFailure(context, cause);
     }
 
+    @Override
+    public void userEventTriggered(ChannelHandlerContext context, Object event) {
+        // The aggregator answered a request expecting a continue with 413, because its body would exceed the limit
+        if (event instanceof HttpExpectationFailedEvent) {
+            notifyObserver(observer -> observer.handshakeRejected(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE.code()));
+        }
+        context.fireUserEventTriggered(event);
+    }
+
     /**
      * Reports a connection failure and applies the configured close policy.
      *
@@ -503,10 +515,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
         if (request.method() != HttpMethod.GET) return false;
         if (request.decoderResult().isFailure()) return false;
 
-        // The opening handshake needs HTTP/1.1 or later and a Host header (RFC 6455, section 4.1)
+        // The opening handshake needs HTTP/1.1 or later and a Host header (RFC 6455, section 4.1),
+        // exactly one and with the syntax of a host and an optional port (RFC 9112, section 3.2)
         if (request.protocolVersion().compareTo(HttpVersion.HTTP_1_1) < 0) return false;
-        String host = request.headers().get(HttpHeaderNames.HOST);
-        if (host == null || host.isEmpty()) return false;
+        List<String> hosts = request.headers().getAll(HttpHeaderNames.HOST);
+        if (hosts.size() != 1 || !HOST.matcher(hosts.getFirst()).matches()) return false;
 
         // Both headers are comma separated token lists compared case-insensitively (RFC 6455, section 4.2.1)
         HttpHeaders headers = request.headers();
@@ -557,23 +570,43 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
     /**
      * Returns the raw path of the request target without its query string.
-     * Only the origin form is accepted, e.g. {@code /chat?token=1}, and an absolute form like {@code ws://host/chat} is not.
-     * A target like {@code //evil.example/chat} parses with an authority, so it does not match {@code /chat} either.
+     * The origin form is accepted, e.g. {@code /chat?token=1}, and the absolute form with an http or https scheme,
+     * which RFC 6455 (section 4.1) allows and a client behind a proxy sends.
+     * An absolute target is rewritten to its origin form, so the upgrade request sees the same path and query.
+     * A fragment is not allowed in either form (RFC 6455, section 3), and a target like {@code //evil.example/chat}
+     * parses with an authority, so it does not match {@code /chat} either.
      *
      * @param request the HTTP request.
-     * @return the request path, or null if the request target is malformed or not in origin form.
+     * @return the request path, or null if the request target is malformed or in neither form.
      */
     private static String getRequestPath(FullHttpRequest request) {
-        if (!request.uri().startsWith("/")) {
-            return null;
-        }
+        URI uri;
 
         try {
-            URI uri = URI.create(request.uri());
-            return uri.getRawAuthority() == null ? uri.getRawPath() : null;
+            uri = URI.create(request.uri());
         } catch (IllegalArgumentException ignored) {
             return null;
         }
+
+        if (uri.getRawFragment() != null) {
+            return null;
+        }
+
+        if (request.uri().startsWith("/")) {
+            return uri.getRawAuthority() == null ? uri.getRawPath() : null;
+        }
+
+        String scheme = uri.getScheme();
+        boolean http = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+
+        if (!http || uri.getRawAuthority() == null || uri.getRawPath() == null) {
+            return null;
+        }
+
+        // An absolute target without a path means the root (RFC 9112, section 3.2.2)
+        String path = uri.getRawPath().isEmpty() ? "/" : uri.getRawPath();
+        request.setUri(uri.getRawQuery() == null ? path : path + "?" + uri.getRawQuery());
+        return path;
     }
 
     /**

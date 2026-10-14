@@ -204,6 +204,65 @@ class HandshakeTest {
         assertThat(opened).as("Session should not be opened").isEmpty();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"http://localhost:8081/chat?token=1", "HTTPS://localhost:8081/chat?token=1"})
+    void shouldUpgradeConnectionWhenRequestTargetIsAbsolute(String target) {
+        List<UpgradeRequest> upgrades = new ArrayList<>();
+        server.onUpgrade((upgradeRequest, _) -> {
+            upgrades.add(upgradeRequest);
+            return UpgradeResult.accept(null);
+        });
+
+        HttpResponse response = sendRequest(Util.createHttpRequest(target));
+
+        assertThat(response.status()).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
+        assertThat(upgrades).singleElement().satisfies(upgrade -> {
+            assertThat(upgrade.getPath()).as("Path of the absolute target").isEqualTo("/chat");
+            assertThat(upgrade.getQueryParameters()).as("Query of the absolute target").containsEntry("token", List.of("1"));
+        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/chat#ignored", "/chat?token=abc#ignored", "/chat#", "http://localhost:8081/chat#ignored"})
+    void shouldRespondWithBadRequestWhenRequestTargetHasFragment(String target) {
+        HttpResponse response = sendRequest(Util.createHttpRequest(target));
+
+        assertThat(response.status()).as("Should receive bad request response").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+        assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"http://localhost:8081", "localhost:8081/chat", "local host", ""})
+    void shouldRespondWithBadRequestWhenHostHeaderIsMalformed(String host) {
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().set(HttpHeaderNames.HOST, host);
+
+        HttpResponse response = sendRequest(request);
+
+        assertThat(response.status()).as("Should receive bad request response").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void shouldRespondWithBadRequestWhenHostHeaderIsRepeated() {
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().add(HttpHeaderNames.HOST, "other.example");
+
+        HttpResponse response = sendRequest(request);
+
+        assertThat(response.status()).as("Should receive bad request response").isEqualTo(HttpResponseStatus.BAD_REQUEST);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"[::1]:8081", "127.0.0.1", "chat.example.com:"})
+    void shouldUpgradeConnectionWhenHostHeaderIsAddressOrHasNoPort(String host) {
+        FullHttpRequest request = Util.createHttpRequest("/chat");
+        request.headers().set(HttpHeaderNames.HOST, host);
+
+        HttpResponse response = sendRequest(request);
+
+        assertThat(response.status()).as("Should switch protocols").isEqualTo(HttpResponseStatus.SWITCHING_PROTOCOLS);
+    }
+
     @Test
     void shouldRespondWithBadRequestWhenRequestIsHttp10() {
         FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_0, HttpMethod.GET, "/chat");
@@ -254,10 +313,39 @@ class HandshakeTest {
         );
         request.headers().set(Util.getDefaultHeaders()).setInt(HttpHeaderNames.CONTENT_LENGTH, 2048);
 
+        List<Integer> rejections = observeRejections();
+
         PipelineResult result = sendRequestThroughPipeline(request);
 
         assertThat(result.response().status()).as("Should reject the body").isEqualTo(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE);
+        assertThat(rejections).as("Observer should see the rejection once").containsExactly(413);
         assertThat(opened).as("Session should not be opened").isEmpty();
+    }
+
+    @Test
+    void shouldReportRejectedBodyToObserverWhenClientExpectsContinue() {
+        server.configure(configurer -> configurer.setMaxHandshakeHeaderSize(1024));
+        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/chat");
+        request.headers().set(Util.getDefaultHeaders())
+            .set(HttpHeaderNames.EXPECT, HttpHeaderValues.CONTINUE)
+            .setInt(HttpHeaderNames.CONTENT_LENGTH, 2048);
+        List<Integer> rejections = observeRejections();
+
+        PipelineResult result = sendRequestThroughPipeline(request);
+
+        assertThat(result.response().status()).as("Should reject the announced body").isEqualTo(HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE);
+        assertThat(rejections).as("Observer should see the rejection once").containsExactly(413);
+    }
+
+    private List<Integer> observeRejections() {
+        List<Integer> rejections = new ArrayList<>();
+        server.observer(new WebSocketServerObserver<>() {
+            @Override
+            public void handshakeRejected(int status) {
+                rejections.add(status);
+            }
+        });
+        return rejections;
     }
 
     @Test

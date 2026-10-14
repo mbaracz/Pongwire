@@ -120,7 +120,7 @@ class Util {
 
     static HttpHeaders getDefaultHeaders() {
         HttpHeaders headers = new DefaultHttpHeaders();
-        headers.add(HttpHeaderNames.HOST, "http://localhost:8081");
+        headers.add(HttpHeaderNames.HOST, "localhost:8081");
         headers.add(HttpHeaderNames.UPGRADE, "websocket");
         headers.add(HttpHeaderNames.CONNECTION, "Upgrade");
         headers.add(HttpHeaderNames.SEC_WEBSOCKET_KEY, Base64.getEncoder().encodeToString("random16ByteKey!".getBytes()));
