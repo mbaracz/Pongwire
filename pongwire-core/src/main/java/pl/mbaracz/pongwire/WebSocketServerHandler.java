@@ -95,8 +95,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
     private boolean rejectionReported;
 
     // Whether a writability callback waits to run, and the writability it reported last, accessed only by the callbacks
+    // and set to the writability at the opening of the session before the first one is submitted
     private final AtomicBoolean writabilityCallbackPending = new AtomicBoolean();
-    private boolean reportedWritable = true;
+    private boolean reportedWritable;
 
     // Payload of the most recent Ping received while the channel was unwritable, answered once it is writable again
     private ByteBuf deferredPongPayload;
@@ -336,6 +337,11 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
     @Override
     public void channelWritabilityChanged(ChannelHandlerContext context) {
+        // A recovery cancels the pending close first, so the Pong below filling the buffer again starts a new one
+        if (openedSession != null && !closeHandled) {
+            updateUnwritableTimeout(context.channel());
+        }
+
         // Before the application callback, which could fill the write buffer again and keep the Pong waiting.
         // The field is cleared first, because the write can change the writability and call this method again.
         if (deferredPongPayload != null && !ClosingHandshake.answersPings(context.channel())) {
@@ -363,10 +369,6 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                     writabilityHandler.handleWritabilityChanged(session, writable);
                 }
             });
-        }
-
-        if (openedSession != null && !closeHandled) {
-            updateUnwritableTimeout(context.channel());
         }
 
         context.fireChannelWritabilityChanged();
@@ -903,7 +905,9 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                     return;
                 }
                 openedSession = session;
-                // The channel may already be unwritable, with no later writability change to start the timeout
+                // The channel may already be unwritable, with no later writability change to start the timeout,
+                // and the first writability change the callbacks report is relative to this state
+                reportedWritable = context.channel().isWritable();
                 updateUnwritableTimeout(context.channel());
                 resetIdleTimeout(context.channel());
                 addHeartbeat(context.pipeline());
@@ -1417,14 +1421,26 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
 
     /**
      * Resumes reading from the connection once the pending callbacks dropped to half of the maximum.
+     * The client's Pong and messages waited unread meanwhile, so the heartbeat and idle deadlines start again,
+     * otherwise a deadline firing right after the resume would close a healthy client.
      *
      * @param context    the channel handler context.
      * @param maxPending the maximum number of pending callbacks.
      */
     private void resumeReading(ChannelHandlerContext context, int maxPending) {
-        if (pendingCallbacks.get() <= maxPending / 2) {
-            ReadGate.setReading(context, true);
+        Channel channel = context.channel();
+
+        if (pendingCallbacks.get() > maxPending / 2 || channel.config().isAutoRead()) {
+            return;
         }
+
+        ReadGate.setReading(context, true);
+
+        if (heartbeatTimeout != null) {
+            cancelHeartbeatTimeout();
+            scheduleHeartbeatTimeout(channel, webSocketServer.getConfiguration().getHeartbeatTimeout());
+        }
+        resetIdleTimeout(channel);
     }
 
     /**

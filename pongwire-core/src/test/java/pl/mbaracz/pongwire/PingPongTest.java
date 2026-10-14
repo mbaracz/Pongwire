@@ -21,8 +21,10 @@ import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageEncoder;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -253,6 +255,47 @@ class PingPongTest {
             }
         });
         return frames;
+    }
+
+    @Test
+    void shouldStartUnwritableTimeoutAgainWhenDeferredPongFillsDrainedBuffer() {
+        // Every pending byte makes the channel unwritable, so the deferred Pong makes it unwritable again
+        server.configure(configurer -> configurer
+            .setWriteBufferWaterMark(1, 1)
+            .setUnwritableTimeout(Duration.ofSeconds(10))
+        );
+        EmbeddedChannel channel = Util.connect(server);
+        channel.freezeTime();
+        AtomicBoolean drainAllowed = new AtomicBoolean();
+        AtomicBoolean drained = new AtomicBoolean();
+
+        // Lets exactly one flush through, the Pong written during it stays in the buffer
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+                if (drainAllowed.get() && drained.compareAndSet(false, true)) {
+                    context.flush();
+                }
+            }
+        });
+        channel.writeAndFlush(new TextWebSocketFrame("x".repeat(4096)));
+        Util.sendFromClient(channel, new PingWebSocketFrame(Unpooled.copiedBuffer("ping", StandardCharsets.UTF_8)));
+
+        // The buffer drains a second before the deadline and the Pong fills it again
+        channel.advanceTimeBy(9, TimeUnit.SECONDS);
+        channel.runScheduledPendingTasks();
+        drainAllowed.set(true);
+        channel.flush();
+        channel.advanceTimeBy(1, TimeUnit.SECONDS);
+        channel.runScheduledPendingTasks();
+
+        assertThat(channel.isOpen()).as("The recovery should cancel the old deadline before the Pong").isTrue();
+
+        channel.advanceTimeBy(9, TimeUnit.SECONDS);
+        channel.runScheduledPendingTasks();
+
+        assertThat(channel.isOpen()).as("The Pong left unread should close the connection after a full timeout").isFalse();
+        channel.releaseOutbound();
     }
 
     @Test

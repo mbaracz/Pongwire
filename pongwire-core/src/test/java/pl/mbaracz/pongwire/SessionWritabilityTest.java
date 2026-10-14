@@ -259,4 +259,22 @@ class SessionWritabilityTest {
         advanceTime(channel, 10);
         assertThat(channel.isOpen()).as("A message without progress should close the connection").isFalse();
     }
+
+    @Test
+    void shouldReportRecoveryWhenChannelWasUnwritableAsSessionOpened() {
+        List<Boolean> notifications = new ArrayList<>();
+        server
+            .configure(configurer -> configurer.setWriteBufferWaterMark(1024, 2048))
+            .onWritabilityChanged((_, writable) -> notifications.add(writable));
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+
+        // Unwritable before the handshake, so onOpen sees isWritable() == false and waits for the recovery
+        channel.unsafe().outboundBuffer().setUserDefinedWritability(1, false);
+        channel.runPendingTasks();
+        Util.performHandshake(channel, "/");
+        channel.unsafe().outboundBuffer().setUserDefinedWritability(1, true);
+        channel.runPendingTasks();
+
+        assertThat(notifications).as("Should report the recovery").containsExactly(true);
+    }
 }

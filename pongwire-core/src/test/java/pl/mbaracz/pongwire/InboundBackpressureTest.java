@@ -215,6 +215,56 @@ class InboundBackpressureTest {
             .satisfies(ReferenceCountUtil::release);
     }
 
+    @Test
+    void shouldStartHeartbeatTimeoutAgainWhenReadingResumesRightBeforeIt() {
+        server.configure(configurer -> configurer
+            .setHeartbeatInterval(Duration.ofSeconds(30))
+            .setHeartbeatTimeout(Duration.ofSeconds(10))
+        );
+        EmbeddedChannel channel = Util.connect(server);
+        channel.freezeTime();
+        advanceTime(channel, 30);
+        Util.readFromServer(channel).release();
+
+        // Reading resumes a second before the deadline, the Pong is still unread on the socket
+        send(channel, 4);
+        advanceTime(channel, 9);
+        runCallbacks(channel, 2);
+        advanceTime(channel, 1);
+
+        assertThat(channel.isOpen()).as("The deadline should start again at the resume").isTrue();
+
+        advanceTime(channel, 8);
+        Util.sendFromClient(channel, new PongWebSocketFrame());
+        advanceTime(channel, 10);
+
+        assertThat(channel.isOpen()).as("The Pong read after the resume should answer the ping").isTrue();
+    }
+
+    @Test
+    void shouldStartIdleTimeoutAgainWhenReadingResumesRightBeforeIt() {
+        server.configure(configurer -> configurer.setIdleTimeout(Duration.ofSeconds(60)));
+        EmbeddedChannel channel = Util.connect(server);
+        channel.freezeTime();
+        send(channel, 4);
+
+        // Reading resumes a second before the deadline, the client's next message is still unread on the socket
+        advanceTime(channel, 59);
+        runCallbacks(channel, 4);
+        advanceTime(channel, 1);
+
+        assertThat(channel.isOpen()).as("The deadline should start again at the resume").isTrue();
+
+        advanceTime(channel, 59);
+        assertThat(channel.isOpen()).as("A full idle timeout should pass after the resume").isTrue();
+
+        advanceTime(channel, 1);
+        assertThat(Util.readFromServer(channel))
+            .as("Should close once the client stays idle after the resume")
+            .isInstanceOf(CloseWebSocketFrame.class)
+            .satisfies(ReferenceCountUtil::release);
+    }
+
     private static void advanceTime(EmbeddedChannel channel, long seconds) {
         channel.advanceTimeBy(seconds, TimeUnit.SECONDS);
         channel.runScheduledPendingTasks();
