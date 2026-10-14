@@ -2,7 +2,7 @@ package pl.mbaracz.pongwire;
 
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.codec.http.HttpRequestDecoder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -264,7 +264,7 @@ class SslTest {
         EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
 
         assertThat(channel.pipeline().context(SslHandler.class)).isNull();
-        assertThat(channel.pipeline().context(HttpServerCodec.class)).isNotNull();
+        assertThat(channel.pipeline().context(HttpRequestDecoder.class)).isNotNull();
     }
 
     @Test
@@ -274,7 +274,7 @@ class SslTest {
         EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
         ChannelPipeline pipeline = channel.pipeline();
         String sslHandler = pipeline.context(SslHandler.class).name();
-        String httpCodec = pipeline.context(HttpServerCodec.class).name();
+        String httpCodec = pipeline.context(HttpRequestDecoder.class).name();
         List<String> handlerNames = pipeline.names();
 
         assertThat(handlerNames.indexOf(sslHandler)).isLessThan(handlerNames.indexOf(httpCodec));

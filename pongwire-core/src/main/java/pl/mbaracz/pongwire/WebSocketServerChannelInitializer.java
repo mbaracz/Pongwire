@@ -13,8 +13,9 @@ import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpRequestDecoder;
+import io.netty.handler.codec.http.HttpResponseEncoder;
 import io.netty.handler.codec.http.HttpResponseStatus;
-import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.Utf8FrameValidator;
 import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
@@ -135,7 +136,12 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
             .setMaxInitialLineLength(configuration.getMaxHandshakeHeaderSize())
             .setMaxHeaderSize(configuration.getMaxHandshakeHeaderSize());
 
-        pipeline.addLast(new HttpServerCodec(httpConfig));
+        // A separate decoder, so Netty replaces it with the WebSocket decoder as soon as the handshake starts.
+        // The bytes a client sends in the same read as its upgrade request then leave the HTTP decoder as bytes
+        // instead of being decoded as a broken HTTP request while the 101 response is still being written.
+        // The encoder stays until the response is written.
+        pipeline.addLast(new HttpRequestDecoder(httpConfig));
+        pipeline.addLast(new HttpResponseEncoder());
         // An upgrade request needs no body, so a body is not allowed to take more memory than the headers
         pipeline.addLast(new HttpObjectAggregator(configuration.getMaxHandshakeHeaderSize()) {
             @Override

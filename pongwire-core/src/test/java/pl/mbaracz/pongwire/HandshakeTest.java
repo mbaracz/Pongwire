@@ -3,10 +3,17 @@ package pl.mbaracz.pongwire;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http.websocketx.PingWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.PongWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.WebSocket13FrameDecoder;
 import io.netty.handler.codec.http.websocketx.WebSocket13FrameEncoder;
+import io.netty.handler.codec.http.websocketx.WebSocketFrame;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -15,8 +22,10 @@ import pl.mbaracz.pongwire.handler.UpgradeResult;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageEncoder;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -534,6 +543,79 @@ class HandshakeTest {
         channel.releaseOutbound();
 
         assertThat(events).as("Messages should follow the opening of the session").containsExactly("open", "first", "second");
+    }
+
+    @Test
+    void shouldFlushPongForPingSentInSameReadAsUpgradeRequestWhenResponseIsWrittenLater() {
+        EmbeddedChannel requestEncoder = Util.newEmbeddedChannel(new HttpRequestEncoder());
+        requestEncoder.writeOutbound(Util.createHttpRequest("/chat"));
+        EmbeddedChannel frameEncoder = Util.newEmbeddedChannel(new WebSocket13FrameEncoder(true));
+        frameEncoder.writeOutbound(new PingWebSocketFrame(Unpooled.copiedBuffer("ping", StandardCharsets.UTF_8)));
+        CompositeByteBuf read = Unpooled.compositeBuffer();
+        ByteBuf buffer;
+
+        while ((buffer = requestEncoder.readOutbound()) != null) {
+            read.addComponent(true, buffer);
+        }
+        while ((buffer = frameEncoder.readOutbound()) != null) {
+            read.addComponent(true, buffer);
+        }
+
+        // The 101 response leaves the server after the read that carried the Ping, like behind a full socket buffer
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+        AtomicBoolean holding = new AtomicBoolean(true);
+        channel.pipeline().addFirst(new ChannelOutboundHandlerAdapter() {
+            @Override
+            public void flush(ChannelHandlerContext context) {
+                if (!holding.get()) {
+                    context.flush();
+                }
+            }
+        });
+        channel.writeInbound(read);
+        assertThat(opened).as("Session should open once the response is written").isEmpty();
+
+        holding.set(false);
+        channel.flush();
+
+        assertThat(opened).as("Session should be opened").hasSize(1);
+        assertThat(channel.isOpen()).as("Connection should stay open").isTrue();
+        assertThat(channel.unsafe().outboundBuffer().totalPendingWriteBytes()).as("The Pong should be flushed").isZero();
+        assertThat(readFramesAfterResponse(channel)).as("Written frames").singleElement().isInstanceOf(PongWebSocketFrame.class);
+    }
+
+    /**
+     * Decodes the HTTP response the server wrote and then the WebSocket frames following it.
+     */
+    private static List<WebSocketFrame> readFramesAfterResponse(EmbeddedChannel channel) {
+        EmbeddedChannel client = Util.newEmbeddedChannel(new HttpResponseDecoder());
+        ByteBuf buffer;
+
+        while ((buffer = channel.readOutbound()) != null) {
+            client.writeInbound(buffer);
+        }
+        assertThat(client.<Object>readInbound()).as("Response").isInstanceOf(HttpResponse.class);
+
+        // After the 101 response the decoder passes the remaining bytes through
+        EmbeddedChannel frameDecoder = Util.newEmbeddedChannel(new WebSocket13FrameDecoder(false, true, 65536));
+        Object remaining;
+
+        while ((remaining = client.readInbound()) != null) {
+            if (remaining instanceof ByteBuf bytes) {
+                frameDecoder.writeInbound(bytes);
+            } else {
+                ReferenceCountUtil.release(remaining);
+            }
+        }
+
+        List<WebSocketFrame> frames = new ArrayList<>();
+        WebSocketFrame frame;
+
+        while ((frame = frameDecoder.readInbound()) != null) {
+            frames.add(frame);
+            frame.release();
+        }
+        return frames;
     }
 
     @Test
