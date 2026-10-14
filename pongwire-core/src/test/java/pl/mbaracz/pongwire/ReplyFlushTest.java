@@ -6,6 +6,7 @@ import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import pl.mbaracz.pongwire.configuration.BackpressurePolicy;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageEncoder;
 
@@ -56,6 +57,21 @@ class ReplyFlushTest {
         server.getSessionByChannelId(channel.id()).sendMessage("hello");
 
         assertThat(countReplies(channel)).as("Reply should be flushed").isEqualTo(1);
+    }
+
+    @Test
+    void shouldDrainReplyThatFilledBufferBeforeNextReplyOfSameRead() {
+        server.configure(configurer -> configurer
+            .setWriteBufferWaterMark(1024, 2048)
+            .setBackpressurePolicy(BackpressurePolicy.REJECT_NEW)
+        );
+        EmbeddedChannel channel = Util.connect(server);
+
+        // The first reply alone exceeds the high watermark, the client reads fine
+        Util.sendFromClient(channel, new TextWebSocketFrame("x".repeat(4096)), new TextWebSocketFrame("second"));
+
+        // The large reply is encoded into a header and a payload buffer, the rejected reply would leave nothing
+        assertThat(countReplies(channel)).as("Should answer both messages").isEqualTo(3);
     }
 
     /**

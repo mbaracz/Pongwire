@@ -894,7 +894,18 @@ final class WebSocketServerHandler<T, D> extends SimpleChannelInboundHandler<Obj
                 context.pipeline().addBefore(
                     context.pipeline().context(WebSocketFrameEncoder.class).name(),
                     "flushConsolidation",
-                    new FlushConsolidationHandler()
+                    new FlushConsolidationHandler() {
+                        @Override
+                        public void flush(ChannelHandlerContext flushContext) throws Exception {
+                            // A reply that filled the buffer is written right away instead of at the end of the read,
+                            // so the next reply of the batch finds the buffer drained and REJECT_NEW does not fail it
+                            if (flushContext.channel().isWritable()) {
+                                super.flush(flushContext);
+                            } else {
+                                flushContext.flush();
+                            }
+                        }
+                    }
                 );
                 session.setSubprotocol(handshaker.selectedSubprotocol());
 
