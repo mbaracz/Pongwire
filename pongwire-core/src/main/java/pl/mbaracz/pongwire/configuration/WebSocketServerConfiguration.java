@@ -408,6 +408,9 @@ public final class WebSocketServerConfiguration<T> {
      */
     public static final class Builder<T> {
 
+        // A token of RFC 9110 (section 5.6.2), which a subprotocol name is
+        private static final Pattern SUBPROTOCOL = Pattern.compile("[!#$%&'*+\\-.^_`|~0-9A-Za-z]+");
+
         // The event loops schedule timeouts in nanoseconds, a longer duration would overflow
         private static final Duration MAX_DURATION = Duration.ofNanos(Long.MAX_VALUE);
 
@@ -787,13 +790,19 @@ public final class WebSocketServerConfiguration<T> {
          * The handshake selects the first subprotocol requested by the client that is also supported.
          * Once any is set, a client that requests none of them is rejected with 400 (Bad Request).
          *
-         * @param subprotocols Supported subprotocols, not "*".
+         * @param subprotocols Supported subprotocols, each one token (RFC 6455, section 4.1), not "*".
          * @return This builder.
-         * @throws IllegalArgumentException If a subprotocol is "*", which Netty would treat as accepting any requested one.
+         * @throws IllegalArgumentException If a subprotocol is "*", which Netty would treat as accepting any requested one,
+         *                                  or is empty or contains a space or a comma, which Netty would split and trim.
          */
         public Builder<T> setSubprotocols(String... subprotocols) {
-            if (List.of(subprotocols).contains("*")) {
-                throw new IllegalArgumentException("Subprotocol must not be a wildcard!");
+            for (String subprotocol : subprotocols) {
+                if (subprotocol.equals("*")) {
+                    throw new IllegalArgumentException("Subprotocol must not be a wildcard!");
+                }
+                if (!SUBPROTOCOL.matcher(subprotocol).matches()) {
+                    throw new IllegalArgumentException("Subprotocol must be one token: " + subprotocol);
+                }
             }
             this.subprotocols = List.of(subprotocols);
             return this;

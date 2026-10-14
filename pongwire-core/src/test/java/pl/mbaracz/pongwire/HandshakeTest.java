@@ -428,9 +428,11 @@ class HandshakeTest {
         assertThat(opened.getFirst().getSubprotocol()).as("Selected subprotocol").isEqualTo("superchat");
     }
 
-    @Test
-    void shouldRejectWildcardSubprotocol() {
-        assertThatThrownBy(() -> server.configure(configurer -> configurer.setSubprotocols("chat", "*")))
+    @ParameterizedTest
+    @ValueSource(strings = {"*", " * ", "chat,*", "chat, other", "", " "})
+    void shouldRejectSubprotocolThatIsNotOneToken(String subprotocol) {
+        // Netty splits and trims the configured values, so a padded or embedded wildcard would still match any request
+        assertThatThrownBy(() -> server.configure(configurer -> configurer.setSubprotocols("chat", subprotocol)))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
