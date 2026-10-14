@@ -23,6 +23,7 @@ import java.util.function.Supplier;
  */
 public class WebSocketSession<T, D> {
 
+    static final int MIN_CLOSE_STATUS_CODE = 1000;
     static final int MAX_CLOSE_STATUS_CODE = 4999;
     private static final int MAX_CLOSE_REASON_LENGTH = 123;
 
@@ -187,8 +188,9 @@ public class WebSocketSession<T, D> {
      *                                  or the reason is longer than 123 bytes in UTF-8.
      */
     public CompletionStage<Void> close(int code, String reason) {
-        // Netty accepts every code from 3000, but RFC 6455 defines them only up to 4999 (section 7.4.2)
-        if (code > MAX_CLOSE_STATUS_CODE) {
+        // Netty accepts every code from 3000 and every negative one, which it writes as an unsigned short,
+        // but RFC 6455 defines the codes from 1000 to 4999 (section 7.4)
+        if (code < MIN_CLOSE_STATUS_CODE || code > MAX_CLOSE_STATUS_CODE) {
             throw new IllegalArgumentException("Invalid close status code: " + code);
         }
 

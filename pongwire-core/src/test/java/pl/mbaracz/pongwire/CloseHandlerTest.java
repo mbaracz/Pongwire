@@ -90,11 +90,15 @@ class CloseHandlerTest {
             .extracting(Close::code).isEqualTo(WebSocketCloseStatus.PROTOCOL_ERROR.code());
     }
 
-    @Test
-    void shouldRejectCloseCodeAboveRfcRange() {
-        WebSocketSession<String, Object> session = server.getSessionByChannelId(Util.connect(server).id());
+    @ParameterizedTest
+    @ValueSource(ints = {5000, 999, 0, -1, Integer.MIN_VALUE})
+    void shouldRejectCloseCodeOutsideRfcRange(int code) {
+        EmbeddedChannel channel = Util.connect(server);
+        WebSocketSession<String, Object> session = server.getSessionByChannelId(channel.id());
 
-        assertThatThrownBy(() -> session.close(5000, "")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> session.close(code, "")).isInstanceOf(IllegalArgumentException.class);
+        assertThat(Util.readFromServer(channel)).as("No close frame should be sent").isNull();
+        assertThat(channel.isOpen()).as("Session should stay open").isTrue();
     }
 
     @Test
