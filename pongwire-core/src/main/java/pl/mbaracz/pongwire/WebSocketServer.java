@@ -546,7 +546,10 @@ public class WebSocketServer<T, D> {
         PendingBrokerOperation operation;
 
         synchronized (sessionTopicLock) {
-            operation = prepareBrokerOperation(topic, () -> broker.publish(topic, message));
+            // Read again under the lock, which topicBroker() takes to replace the broker once no operation is active,
+            // so the operation registered here never reaches a broker replaced and closed meanwhile
+            TopicBroker<T> current = topicBroker;
+            operation = prepareBrokerOperation(topic, () -> current.publish(topic, message));
         }
 
         return readOnly(operation.start());
