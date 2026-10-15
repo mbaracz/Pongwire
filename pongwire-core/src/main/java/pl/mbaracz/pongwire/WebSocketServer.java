@@ -519,7 +519,8 @@ public class WebSocketServer<T, D> {
      * Publishes a message to all WebSocket sessions subscribed to a given topic.
      *
      * @param topic   The topic to which the message will be published.
-     * @param message The message to be published, not null.
+     * @param message The message to be published, not null. It is encoded when the broker delivers it, which may be
+     *                after the returned stage completes, so it must not be changed until every delivery is done.
      * @return A stage completed when the broker has accepted the message, or failed when the message cannot be
      * encoded. The operations of one topic reach the broker one at a time, and each fails after the broker
      * operation timeout.

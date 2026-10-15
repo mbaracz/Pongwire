@@ -10,8 +10,9 @@ import java.util.concurrent.CompletionStage;
  *
  * The server may call the next operation of a topic from the thread that completes the stage of the previous one,
  * so do not complete a stage while holding a lock that the broker methods also take.
- * {@link TopicMessageHandler#onMessage} encodes the message and queues it for the sessions without blocking,
- * so it may be called from any thread, including an I/O thread of the broker.
+ * {@link TopicMessageHandler#onMessage} encodes the message on the calling thread and queues the writes without
+ * waiting for them, so an I/O thread of the broker may call it as long as the configured encoder does not block.
+ * Encoders must support concurrent calls, topics are delivered concurrently.
  *
  * The server gives up on an operation after the broker operation timeout and then forgets the subscription.
  * It may subscribe the topic again with a new handler while the broker still completes the old operation,

@@ -62,6 +62,8 @@ in the [conformance workflow](.github/workflows/conformance.yml).
 
 The supported test set excludes group 9 cases requiring messages above the default 1 MiB message limit, and cases
 13.3 and 13.5 requiring a `server_max_window_bits` below 15, which the JDK's zlib does not support.
+A compressed message whose first fragment inflates to nothing, which RFC 7692 allows, is rejected with `1002` by
+Netty's decompressor.
 
 ## JSON and Pub/Sub
 
@@ -103,8 +105,10 @@ a mapper, the codecs use Jackson's defaults with java.time support. A mapper pas
 clients, so it must not enable polymorphic typing, e.g. `activateDefaultTyping`, which lets a client choose the classes
 the server instantiates.
 
-The stages returned by `publish`, `subscribe` and `unsubscribe` are the only place where topic broker failures are
-reported, so handle them.
+The stages returned by `publish`, `subscribe`, `unsubscribe` and `unsubscribeAllTopics` are where the failures of
+these broker operations are reported, so handle them. The unsubscribe the server runs itself when the last subscriber
+of a topic disconnects logs its failure at WARN. A published message is encoded when the broker delivers it, which may
+be after the stage completes, so do not change it until every delivery is done.
 
 `UpgradeRequest` gives access to the request path, query parameters, cookies, and headers.
 
@@ -148,11 +152,14 @@ server.configure(config -> config.setCallbackExecutor(executor));
 - `sendMessage` and `sendMessageAsync` are safe to call from other threads and concurrently. Concurrent sends do not have a defined relative order.
 - The stages returned by `sendMessageAsync` and `close` usually complete on the event loop. Use the `*Async` methods of
   the stage, e.g. `thenRunAsync`, for continuations that block.
-- The stages returned by `publish`, `subscribe` and `unsubscribe` complete on the thread that completes the broker
-  operation, which can be an event loop or a thread of the broker.
+- The stages returned by `publish`, `subscribe` and `unsubscribe` complete on whichever thread completes the broker
+  operation, which can be an event loop, a thread of the broker, the calling thread for an operation that needs no
+  broker call, or the timeout thread of `CompletableFuture` after the broker operation timeout.
   Calling `stop()` from such a continuation fails on an event loop, so use `thenRunAsync` for it as well.
-- The message decoder and encoder run on the event loop, also with a `callbackExecutor`, so large messages with an
-  expensive codec delay the other sessions of that loop.
+- The message decoder runs on the event loop, and so does the encoder for `sendMessage` and `sendMessageAsync`, also
+  with a `callbackExecutor`, so large messages with an expensive codec delay the other sessions of that loop.
+  `broadcast` encodes on its calling thread and a topic message is encoded on the thread the broker delivers it on,
+  so the encoder must support concurrent calls.
 - The application owns the configured executor and is responsible for shutting it down.
 
 ## Production behavior
@@ -160,6 +167,8 @@ server.configure(config -> config.setCallbackExecutor(executor));
 ### Error handling
 
 Failures are reported to `onError` and to the observer, with the session or `null` before the session was opened.
+Protocol violations Netty's validators answer themselves, e.g. invalid UTF-8 with `1007`, a reserved bit or a message
+too large with `1002` or `1009`, only reach `onClose` with that status.
 
 | Failure                                          | `onError` receives                        | Logged at |
 |--------------------------------------------------|-------------------------------------------|-----------|
@@ -168,13 +177,16 @@ Failures are reported to `onError` and to the observer, with the session or `nul
 | Connection reset or WebSocket protocol violation | The exception                             | DEBUG     |
 | Callback rejected by the callback executor       | `RejectedExecutionException`              | ERROR     |
 
-By default (`closeOnException` is `false`) the session stays open after a failure and the failed message is dropped.
+By default (`closeOnException` is `false`) the session stays open after a failure of the application, i.e. of a
+callback or of the codec, and the failed message is dropped.
 With `closeOnException` enabled, an open session is closed with `1007` when its message cannot be decoded and with
-`1011` on other server-side failures. A broken connection or a protocol violation closes the connection without a
-close frame of its own. Netty already answered the violation with `1002` or `1009`.
+`1011` on other server-side failures. A broken connection closes without a close frame, and a protocol violation
+closes with its own status whatever the setting, e.g. `1002` for a malformed frame, `1007` for invalid UTF-8 or
+corrupted compressed data and `1009` for a message too large.
 
-Independently of this setting, a session whose callback the executor rejects is closed with `1013`, an exception thrown
-by `onUpgrade` is answered with `500`, and a send to a session that is already closed only fails the stage returned by
+Independently of this setting, a session whose callback the executor rejects is closed with `1013` and the callbacks
+queued behind the rejected one are dropped, except `onClose`, which still runs. An exception thrown by `onUpgrade` is
+answered with `500`, and a send to a session that is already closed only fails the stage returned by
 `sendMessageAsync`.
 
 ### Heartbeat and idle timeout
@@ -196,15 +208,18 @@ reconnect with a random delay.
 | `BUFFER` (default) | Keeps accepting sends into Netty's outbound buffer while the connection is unwritable.    |
 | `REJECT_NEW`       | Fails new sends with `BackpressureException` until the connection becomes writable again. |
 
-`unwritableTimeout` can close connections that stay unwritable for too long. It is disabled by default.
+`unwritableTimeout` closes connections that stay unwritable for too long. It is disabled by default. It cleans up
+stalled connections, it does not cap their buffers: every send accepted under `BUFFER` is held until the timeout fires,
+so enough broadcasts within the timeout can still exhaust memory.
 
 With the defaults, `BUFFER` and no `unwritableTimeout`, nothing limits the outbound buffer of a client that stops
 reading. Every broadcast or topic message adds to it until the server runs out of memory, so a public server should set
-`unwritableTimeout`, or use `REJECT_NEW`.
+`unwritableTimeout` and keep the rate of its broadcasts in check, or use `REJECT_NEW`.
 
-A message larger than the high write buffer watermark (64 KiB by default) makes the connection unwritable on its own.
-Under `REJECT_NEW` the next send then fails although the client reads fine, so set the high watermark with
-`setWriteBufferWaterMark` above the largest message the server sends.
+A message larger than the high write buffer watermark (64 KiB by default) makes the connection unwritable until the
+transport took most of it, and Netty counts the encoded frame with its bookkeeping, not the payload alone. Under
+`REJECT_NEW` the sends executed meanwhile fail although the client reads fine, so set the high watermark with
+`setWriteBufferWaterMark` above the largest message the server sends plus the burst it sends at once.
 
 ### Limits
 
@@ -218,8 +233,10 @@ With compression, `maxFrameSize` limits the compressed size on the wire, and a d
 The number of connections is not limited by default. `maxConnections` caps the open connections and
 `maxConnectionsPerAddress` those of one IP address, counted from the TCP accept, and a connection past a limit is
 closed right away.
-Size them to the memory available: a connection may buffer up to `maxFrameSize` plus `maxMessageSize` of direct memory,
-2 MiB with the defaults, and the compressor and decompressor take a few hundred KiB more.
+Size them to the memory available: a connection holds up to `maxFrameSize` plus `maxMessageSize` of inbound data,
+2 MiB with the defaults, and the compressor and decompressor take a few hundred KiB more. Outbound data comes on top
+and is unbounded under the default `BUFFER` policy, see Backpressure, as are the messages queued for the callback
+executor up to `maxPendingCallbacks`, and TLS adds its own buffers.
 
 ### Shutdown
 

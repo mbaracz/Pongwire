@@ -653,8 +653,9 @@ public final class WebSocketServerConfiguration<T> {
         /**
          * Sets how many connections may be open at once, counted from the TCP accept, before the WebSocket handshake.
          * A connection past the limit is closed right away, without a response.
-         * Each connection may hold up to the maximum frame size plus the maximum message size of buffered data,
+         * Each connection may hold up to the maximum frame size plus the maximum message size of inbound data,
          * and a few hundred KiB more for the compressor with compression, so size the limit to the memory available.
+         * Outbound data comes on top, unbounded under the BUFFER policy without an unwritable timeout.
          *
          * @param maxConnections Maximum number of open connections, or 0 for no limit (default).
          * @return This builder.
@@ -704,7 +705,8 @@ public final class WebSocketServerConfiguration<T> {
          * watermark waits to be written, and writable again once less than the low watermark is left.
          * Netty's defaults are 32 KiB and 64 KiB.
          * A message larger than the high watermark makes the connection unwritable until most of it is sent,
-         * which reports a writability change for each such message and fails the next send under REJECT_NEW.
+         * which reports a writability change for each such message and fails the sends executed meanwhile under REJECT_NEW.
+         * Netty counts the encoded frames with their bookkeeping, so the watermark holds a few hundred bytes less of payload.
          *
          * @param low  Low watermark in bytes.
          * @param high High watermark in bytes, at least the low watermark.
@@ -730,7 +732,8 @@ public final class WebSocketServerConfiguration<T> {
          * Without an unwritable timeout, the buffer of a client that stops reading grows without a limit under BUFFER,
          * e.g. with every broadcast, until the server runs out of memory.
          * Under REJECT_NEW, a single message larger than the high watermark makes the connection unwritable at once,
-         * so the next send fails although the client reads fine. Set the high watermark above the largest message.
+         * so a send executed before the transport took it fails although the client reads fine.
+         * Set the high watermark above the largest message plus the burst sent at once.
          *
          * @param backpressurePolicy Backpressure policy, not null.
          * @return This builder.
@@ -743,7 +746,8 @@ public final class WebSocketServerConfiguration<T> {
         /**
          * Sets how long the write buffer of an unwritable connection may not drain, for example because the client stopped
          * reading, before the connection is closed. A client that reads a large message slowly keeps its connection.
-         * Under the default BUFFER policy, this timeout is what bounds the buffer of a client that stopped reading.
+         * Under the default BUFFER policy, this timeout is what ends the growth of the buffer of a client that stopped
+         * reading. It caps no bytes, so enough sends within the timeout can still exhaust memory before it fires.
          *
          * @param unwritableTimeout Unwritable timeout, positive, or null to keep unwritable connections open (default).
          * @return This builder.
@@ -812,7 +816,9 @@ public final class WebSocketServerConfiguration<T> {
          * Sets whether to negotiate the permessage-deflate compression (RFC 7692) with clients that offer it.
          * Over TLS, compressed sizes can reveal a secret sent in the same compression context as data an attacker
          * chooses, like CRIME and BREACH do for HTTPS.
-         * Keep secrets and attacker-controlled content apart, or reset the context with server_no_context_takeover.
+         * Keep secrets and attacker-controlled content out of the same compressed message, and out of the same context
+         * unless server_no_context_takeover resets it after every message. Disable compression when that cannot be
+         * guaranteed.
          * With context takeover, a connection keeps about 300 KiB of native zlib memory once it compressed a message.
          *
          * @param compressionEnabled True to compress messages of clients that support it, false otherwise (default).
