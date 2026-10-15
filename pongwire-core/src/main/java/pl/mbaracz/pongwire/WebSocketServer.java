@@ -520,13 +520,24 @@ public class WebSocketServer<T, D> {
      *
      * @param topic   The topic to which the message will be published.
      * @param message The message to be published, not null.
-     * @return A stage completed when the broker has accepted the message. The operations of one topic reach the broker
-     * one at a time, and each fails after the broker operation timeout.
+     * @return A stage completed when the broker has accepted the message, or failed when the message cannot be
+     * encoded. The operations of one topic reach the broker one at a time, and each fails after the broker
+     * operation timeout.
      */
     public CompletionStage<Void> publish(String topic, T message) {
         Objects.requireNonNull(topic, "Topic must not be null!");
         Objects.requireNonNull(message, "Message must not be null!");
         TopicBroker<T> broker = topicBroker;
+
+        // A broker may accept the message before it delivers it, so the message is checked here, where the caller
+        // sees the failure. The in-memory broker fails the publish from its delivery instead, which encodes once.
+        if (!(broker instanceof InMemoryTopicBroker<T>)) {
+            try {
+                encode(message);
+            } catch (RuntimeException exception) {
+                return readOnly(CompletableFuture.failedFuture(exception));
+            }
+        }
 
         // The in-memory broker orders the publishes of a topic itself, so only a pending subscription change needs the chain
         if (broker instanceof InMemoryTopicBroker<T> && !topicBrokerOperations.containsKey(topic)) {
@@ -555,6 +566,20 @@ public class WebSocketServer<T, D> {
         return readOnly(operation.start());
     }
 
+    private void notifyObserver(Throwable exception) {
+        WebSocketServerObserver<T, D> observer = this.observer;
+
+        if (observer == null) {
+            return;
+        }
+
+        try {
+            observer.exception(null, exception);
+        } catch (Throwable observerException) {
+            LOGGER.warn("WebSocket server observer failed", observerException);
+        }
+    }
+
     /**
      * Retrieves a snapshot of all the topics to which WebSocket sessions are subscribed.
      * The returned set is unmodifiable and does not change when sessions subscribe or unsubscribe later.
@@ -575,9 +600,18 @@ public class WebSocketServer<T, D> {
      */
     private void handleTopicMessage(Collection<WebSocketSession<T, D>> subscribers, T message) {
         Map<EventExecutor, List<WebSocketSession<T, D>>> subscribersByLoop = new HashMap<>();
+        byte[] payload;
 
-        // Encoded once for all subscribers, a failure fails the delivery instead of every connection
-        byte[] payload = encode(message);
+        // Encoded once for all subscribers, a failure fails the delivery instead of every connection.
+        // A message another node published is encoded only here, so its failure is reported to the observer
+        // before the broker sees it.
+        try {
+            payload = encode(message);
+        } catch (RuntimeException exception) {
+            LOGGER.error("Could not encode a topic message", exception);
+            notifyObserver(exception);
+            throw exception;
+        }
 
         for (WebSocketSession<T, D> session : subscribers) {
             subscribersByLoop.computeIfAbsent(session.getChannelContext().executor(), _ -> new ArrayList<>()).add(session);

@@ -11,6 +11,7 @@ import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageEncoder;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -599,6 +600,41 @@ class TopicBrokerTest {
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    @Test
+    void shouldFailPublishWhenMessageCannotBeEncodedAlthoughBrokerAcceptsIt() {
+        server.configure(configurer -> configurer.setMessageEncoder(_ -> {
+            throw new IllegalStateException("encoder failed");
+        }));
+
+        CompletableFuture<Void> publish = server.publish("topic", "message").toCompletableFuture();
+
+        assertThat(publish).as("Publish should fail before the broker accepts the message").isCompletedExceptionally();
+        assertThat(broker.calls).as("Broker should not see the message").isEmpty();
+    }
+
+    @Test
+    void shouldReportDeliveredMessageThatCannotBeEncodedToObserver() {
+        List<Throwable> observed = new ArrayList<>();
+        server
+            .configure(configurer -> configurer.setMessageEncoder(_ -> {
+                throw new IllegalStateException("encoder failed");
+            }))
+            .observer(new WebSocketServerObserver<>() {
+                @Override
+                public void exception(WebSocketSession<String, Object> session, Throwable exception) {
+                    observed.add(exception);
+                }
+            });
+        EmbeddedChannel channel = Util.connect(server);
+        server.subscribe(server.getSessionByChannelId(channel.id()), "topic").toCompletableFuture().join();
+
+        // The message comes from the broker, e.g. published by another node, so no publish stage can report it
+        assertThatThrownBy(() -> broker.handlers.getFirst().onMessage("topic", "remote"))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(observed).as("Observer should see the failure").singleElement()
+            .extracting(Throwable::getMessage).isEqualTo("encoder failed");
     }
 
     @Test
