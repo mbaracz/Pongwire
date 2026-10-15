@@ -1,6 +1,7 @@
 package pl.mbaracz.pongwire.message.impl.json;
 
 import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -8,6 +9,10 @@ import pl.mbaracz.pongwire.message.MessageDecodeException;
 import pl.mbaracz.pongwire.message.MessageDecoder;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
 /**
@@ -93,6 +98,10 @@ public class JsonMessageDecoder<T> implements MessageDecoder<T> {
 
         // Parsed with the mapper itself, so modules registered on it later still apply
         try (JsonParser parser = mapper.createParser(data)) {
+            // The token is checked, because a deserializer may turn the null token into a value, e.g. a NullNode or 0
+            if (parser.nextToken() == JsonToken.VALUE_NULL) {
+                throw new MessageDecodeException("JSON null is not a message", data, null);
+            }
             message = mapper.readValue(parser, type);
 
             if (parser.nextToken() != null) {
@@ -109,9 +118,10 @@ public class JsonMessageDecoder<T> implements MessageDecoder<T> {
     }
 
     /**
-     * Jackson detects UTF-16 and UTF-32 from a byte order mark or from zero bytes at the start.
-     * JSON text in UTF-8 has neither.
-     * A zero byte cannot appear unescaped.
+     * Checks that the bytes are well-formed UTF-8, with an optional byte order mark.
+     * Jackson detects UTF-16 and UTF-32 from a byte order mark or from zero bytes at the start, which are valid
+     * UTF-8 on their own, so a text in another encoding would be decoded instead of rejected.
+     * Jackson also accepts overlong encodings, and a binary frame was not validated by the server like a text frame.
      */
     private static boolean isUtf8(byte[] data) {
         for (int i = 0; i < Math.min(4, data.length); i++) {
@@ -120,8 +130,20 @@ public class JsonMessageDecoder<T> implements MessageDecoder<T> {
             }
         }
 
-        boolean utf16ByteOrderMark = data.length >= 2
-            && (data[0] == (byte) 0xFE && data[1] == (byte) 0xFF || data[0] == (byte) 0xFF && data[1] == (byte) 0xFE);
-        return !utf16ByteOrderMark;
+        if (data.length >= 2 && (data[0] == (byte) 0xFE && data[1] == (byte) 0xFF || data[0] == (byte) 0xFF && data[1] == (byte) 0xFE)) {
+            return false;
+        }
+
+        int start = data.length >= 3 && data[0] == (byte) 0xEF && data[1] == (byte) 0xBB && data[2] == (byte) 0xBF ? 3 : 0;
+
+        try {
+            StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(data, start, data.length - start));
+            return true;
+        } catch (CharacterCodingException exception) {
+            return false;
+        }
     }
 }

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import org.junit.jupiter.api.BeforeEach;
@@ -65,6 +66,34 @@ public class JsonMessageDecoderTest {
         assertThatThrownBy(() -> decoder.decode("null".getBytes(StandardCharsets.UTF_8)))
             .isInstanceOf(MessageDecodeException.class)
             .hasMessageContaining("null");
+    }
+
+    @Test
+    void shouldRejectJsonNullWhenDeserializerTurnsItIntoValue() {
+        // A JsonNode comes back as a NullNode and a primitive as 0, neither is a message
+        JsonMessageDecoder<JsonNode> nodeDecoder = new JsonMessageDecoder<>(JsonNode.class);
+        JsonMessageDecoder<Integer> intDecoder = new JsonMessageDecoder<>(new ObjectMapper(), new ObjectMapper().constructType(int.class));
+
+        assertThatThrownBy(() -> nodeDecoder.decode("null".getBytes(StandardCharsets.UTF_8))).isInstanceOf(MessageDecodeException.class);
+        assertThatThrownBy(() -> intDecoder.decode("null".getBytes(StandardCharsets.UTF_8))).isInstanceOf(MessageDecodeException.class);
+    }
+
+    @Test
+    void shouldRejectMalformedUtf8() {
+        JsonMessageDecoder<String> stringDecoder = new JsonMessageDecoder<>(String.class);
+        // An overlong encoding of "/", which Jackson decodes although it is invalid UTF-8
+        byte[] overlong = {'"', (byte) 0xE0, (byte) 0x80, (byte) 0xAF, '"'};
+
+        assertThatThrownBy(() -> stringDecoder.decode(overlong))
+            .isInstanceOf(MessageDecodeException.class)
+            .hasMessageContaining("UTF-8");
+    }
+
+    @Test
+    void shouldAcceptUtf8ByteOrderMark() {
+        byte[] json = "\uFEFF{\"text\":\"a\",\"number\":1}".getBytes(StandardCharsets.UTF_8);
+
+        assertThat(decoder.decode(json)).isEqualTo(new TestMessage("a", 1));
     }
 
     @Test
