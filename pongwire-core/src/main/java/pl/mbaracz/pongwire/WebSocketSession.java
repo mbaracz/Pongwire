@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -215,15 +216,26 @@ public class WebSocketSession<T, D> {
     /**
      * Runs the action once the future is done. A completed future is handled right away, because a future of a
      * terminated event loop, e.g. after the server stopped, cannot notify its listeners anymore.
+     * The future may complete and the event loop terminate between the check and the registration of the listener,
+     * so the check is repeated afterwards and the action runs once, whichever path reaches it first.
      *
      * @param future the future to wait for.
      * @param action the action receiving the done future.
      */
     private static void whenDone(ChannelFuture future, Consumer<ChannelFuture> action) {
+        AtomicBoolean done = new AtomicBoolean();
+        Runnable once = () -> {
+            if (done.compareAndSet(false, true)) {
+                action.accept(future);
+            }
+        };
+
+        if (!future.isDone()) {
+            future.addListener(_ -> once.run());
+        }
+
         if (future.isDone()) {
-            action.accept(future);
-        } else {
-            future.addListener(_ -> action.accept(future));
+            once.run();
         }
     }
 }

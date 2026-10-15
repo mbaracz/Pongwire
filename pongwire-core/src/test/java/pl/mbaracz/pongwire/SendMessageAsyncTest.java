@@ -1,9 +1,14 @@
 package pl.mbaracz.pongwire;
 
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
+import io.netty.channel.DefaultChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
+import io.netty.util.concurrent.GenericFutureListener;
+import io.netty.util.concurrent.ImmediateEventExecutor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -17,6 +22,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.channels.ClosedChannelException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -306,6 +312,39 @@ class SendMessageAsyncTest {
             clientExecutor.shutdownNow();
             assertThat(clientExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
         }
+    }
+
+    @Test
+    void shouldCompleteStageWhenWriteCompletesBeforeListenerIsAddedAndEventLoopCannotNotify() {
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new ChannelInboundHandlerAdapter());
+
+        // Reports itself pending at the first check, is done afterwards and loses the listener,
+        // like a write completed and an event loop terminated between the two
+        DefaultChannelPromise write = new DefaultChannelPromise(channel, ImmediateEventExecutor.INSTANCE) {
+            private boolean checked;
+
+            @Override
+            public boolean isDone() {
+                if (!checked) {
+                    checked = true;
+                    return false;
+                }
+                return super.isDone();
+            }
+
+            @Override
+            public ChannelPromise addListener(GenericFutureListener<? extends io.netty.util.concurrent.Future<? super Void>> listener) {
+                return this;
+            }
+        };
+        write.setSuccess();
+        WebSocketSession<String, Object> session = new WebSocketSession<>(
+            channel.pipeline().firstContext(), (_, _) -> write, String::getBytes, null, Duration.ofSeconds(1)
+        );
+
+        CompletionStage<Void> result = session.sendMessageAsync("message");
+
+        assertThat(result.toCompletableFuture()).as("Stage should complete without the listener").isCompleted();
     }
 
     @Test
