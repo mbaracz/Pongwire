@@ -1,10 +1,14 @@
 package pl.mbaracz.pongwire.micrometer;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.SoftAssertions.assertSoftly;
@@ -67,5 +71,20 @@ class WebSocketServerMetricsTest {
     void shouldTagEveryMetricWhenTagsAreGiven() {
         assertThat(registry.find("pongwire.sessions.active").tag("server", "chat").gauge()).as("Gauge should be tagged").isNotNull();
         assertThat(registry.find("pongwire.errors").tag("server", "chat").counter()).as("Counter should be tagged").isNotNull();
+    }
+
+    @Test
+    void shouldKeepTagsWhenCallerChangesItsCollectionAfterConstruction() {
+        List<Tag> tags = new ArrayList<>(List.of(Tag.of("server", "chat")));
+        WebSocketServerMetrics<String, Object> metrics = new WebSocketServerMetrics<>(registry, tags);
+        tags.clear();
+
+        metrics.sessionClosed(null, 1000, "bye");
+        metrics.handshakeRejected(403);
+
+        assertThat(registry.find("pongwire.sessions.closed").tag("server", "chat").counter())
+            .as("Closed counter should keep the tags given at construction").isNotNull();
+        assertThat(registry.find("pongwire.handshakes.rejected").tag("server", "chat").counter())
+            .as("Rejected counter should keep the tags given at construction").isNotNull();
     }
 }

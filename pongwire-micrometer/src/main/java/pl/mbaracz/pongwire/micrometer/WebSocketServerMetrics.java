@@ -21,7 +21,9 @@ public class WebSocketServerMetrics<T, D> implements WebSocketServerObserver<T, 
 
     private final AtomicInteger activeSessions = new AtomicInteger();
     private final MeterRegistry registry;
-    private final Iterable<Tag> tags;
+    // Copied once, so the meters created later carry the same tags as the ones registered here,
+    // also when the caller changes its collection afterwards
+    private final Tags tags;
     private final Counter sessionsOpened;
     private final Counter messagesReceived;
     private final Counter messagesSent;
@@ -44,7 +46,7 @@ public class WebSocketServerMetrics<T, D> implements WebSocketServerObserver<T, 
      */
     public WebSocketServerMetrics(MeterRegistry registry, Iterable<Tag> tags) {
         this.registry = registry;
-        this.tags = tags;
+        this.tags = Tags.of(tags);
 
         Gauge.builder("pongwire.sessions.active", activeSessions, AtomicInteger::get)
             .description("The number of open sessions")
@@ -73,13 +75,13 @@ public class WebSocketServerMetrics<T, D> implements WebSocketServerObserver<T, 
     @Override
     public void sessionClosed(WebSocketSession<T, D> session, int code, String reason) {
         activeSessions.decrementAndGet();
-        counter(registry, Tags.of(tags).and("code", String.valueOf(code)), "pongwire.sessions.closed", "The number of closed sessions")
+        counter(registry, tags.and("code", String.valueOf(code)), "pongwire.sessions.closed", "The number of closed sessions")
             .increment();
     }
 
     @Override
     public void handshakeRejected(int status) {
-        counter(registry, Tags.of(tags).and("status", String.valueOf(status)), "pongwire.handshakes.rejected", "The number of rejected handshakes")
+        counter(registry, tags.and("status", String.valueOf(status)), "pongwire.handshakes.rejected", "The number of rejected handshakes")
             .increment();
     }
 
