@@ -28,6 +28,7 @@ import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensio
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensionHandshaker;
 import io.netty.handler.codec.http.websocketx.extensions.compression.PerMessageDeflateServerExtensionHandshaker;
 import io.netty.handler.ssl.ClientAuth;
+import io.netty.handler.ssl.IdentityCipherSuiteFilter;
 import io.netty.handler.ssl.JdkSslContext;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
@@ -35,6 +36,7 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import pl.mbaracz.pongwire.configuration.WebSocketServerConfiguration;
 
+import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLParameters;
 
@@ -114,10 +116,16 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
         pipeline.addLast(new ReadGate());
 
         if (sslContext != null) {
-            if (!acquireTlsHandshake(configuration.getMaxConcurrentTlsHandshakes())) {
+            int maxConcurrentTlsHandshakes = configuration.getMaxConcurrentTlsHandshakes();
+
+            if (!acquireTlsHandshake(maxConcurrentTlsHandshakes)) {
                 channel.close();
                 return;
             }
+
+            // Registered before the engine is created, so a failing setup, which closes the connection, releases the slot
+            Runnable release = maxConcurrentTlsHandshakes > 0 ? releaseTlsHandshakeOnce() : () -> {};
+            channel.closeFuture().addListener(_ -> release.run());
 
             SslHandler sslHandler = sslContext.newHandler(channel.alloc());
             // The server's handshake timeout runs from the accept and covers the TLS handshake too, so Netty's fixed
@@ -128,8 +136,8 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
             }
             pipeline.addLast(sslHandler);
 
-            if (configuration.getMaxConcurrentTlsHandshakes() > 0) {
-                releaseTlsHandshakeWhenDone(channel);
+            if (maxConcurrentTlsHandshakes > 0) {
+                pipeline.addLast(releaseWhenHandshakeCompletes(release));
             }
         }
 
@@ -205,19 +213,23 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
     }
 
     /**
-     * Releases the counted TLS handshake once it completes or fails, or the connection closes before.
-     * Added behind the TLS handler, which fires the completion event towards the handlers after it.
+     * Returns the release of one counted TLS handshake, which decrements the count the first time it runs.
      */
-    private void releaseTlsHandshakeWhenDone(Channel channel) {
+    private Runnable releaseTlsHandshakeOnce() {
         AtomicBoolean released = new AtomicBoolean();
-        Runnable release = () -> {
+        return () -> {
             if (released.compareAndSet(false, true)) {
                 tlsHandshakes.decrementAndGet();
             }
         };
+    }
 
-        channel.closeFuture().addListener(_ -> release.run());
-        channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+    /**
+     * Releases the counted TLS handshake once it completes or fails.
+     * Added behind the TLS handler, which fires the completion event towards the handlers after it.
+     */
+    private static ChannelInboundHandlerAdapter releaseWhenHandshakeCompletes(Runnable release) {
+        return new ChannelInboundHandlerAdapter() {
             @Override
             public void userEventTriggered(ChannelHandlerContext context, Object event) {
                 context.fireUserEventTriggered(event);
@@ -227,7 +239,7 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
                     context.pipeline().remove(this);
                 }
             }
-        });
+        };
     }
 
     private static SslContext createSslContext(TlsConfiguration configuration) {
@@ -236,7 +248,20 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
         }
 
         if (configuration.sslContext() != null) {
-            return new JdkSslContext(configuration.sslContext(), false, ClientAuth.NONE);
+            // Netty would enable its own cipher suites and protocols, so the context's server engine says which to keep
+            SSLEngine defaults = configuration.sslContext().createSSLEngine();
+            defaults.setUseClientMode(false);
+
+            return new JdkSslContext(
+                configuration.sslContext(),
+                false,
+                List.of(defaults.getEnabledCipherSuites()),
+                IdentityCipherSuiteFilter.INSTANCE,
+                null,
+                ClientAuth.NONE,
+                defaults.getEnabledProtocols(),
+                false
+            );
         }
 
         File certificateChain = configuration.certificateChain().toFile();

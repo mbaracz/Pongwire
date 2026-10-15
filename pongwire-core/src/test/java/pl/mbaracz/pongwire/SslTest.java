@@ -14,11 +14,18 @@ import pl.mbaracz.pongwire.handler.UpgradeResult;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageEncoder;
 
+import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLContextSpi;
+import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLPeerUnverifiedException;
+import javax.net.ssl.SSLServerSocketFactory;
+import javax.net.ssl.SSLSessionContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 
 import java.net.Socket;
@@ -27,6 +34,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.security.KeyStore;
+import java.security.SecureRandom;
 import java.security.Security;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
@@ -39,6 +47,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.UnaryOperator;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -255,6 +264,87 @@ class SslTest {
 
             assertThat(closed).as("Exactly one connection should be past the limit").isEqualTo(1);
         }
+    }
+
+    @Test
+    void shouldKeepProtocolsOfSuppliedContextWhenNoParametersAreGiven() throws Exception {
+        SSLContext restricted = wrapEngines(createSslContext(certificate, certificate), engine -> {
+            engine.setEnabledProtocols(new String[] {"TLSv1.2"});
+            return engine;
+        });
+        server = newServer(TlsConfiguration.forSslContext(restricted));
+
+        EmbeddedChannel channel = Util.newEmbeddedChannel(new WebSocketServerChannelInitializer<>(server));
+
+        assertThat(channel.pipeline().get(SslHandler.class).engine().getEnabledProtocols())
+            .as("Enabled protocols of the server engine")
+            .containsExactly("TLSv1.2");
+    }
+
+    @Test
+    void shouldReleaseHandshakeSlotWhenTlsSetupFails() throws Exception {
+        AtomicBoolean failNext = new AtomicBoolean();
+        SSLContext flaky = wrapEngines(createSslContext(certificate, certificate), engine -> {
+            if (failNext.getAndSet(false)) {
+                throw new IllegalStateException("engine creation failed");
+            }
+            return engine;
+        });
+        server = newServer(TlsConfiguration.forSslContext(flaky))
+            .configure(configurer -> configurer.setMaxConcurrentTlsHandshakes(1));
+        WebSocketServerChannelInitializer<String, Object> initializer = new WebSocketServerChannelInitializer<>(server);
+
+        // The initializer closes the first connection when its engine cannot be created
+        failNext.set(true);
+        EmbeddedChannel failed = Util.newEmbeddedChannel(initializer);
+        EmbeddedChannel next = Util.newEmbeddedChannel(initializer);
+
+        assertThat(failed.isOpen()).as("Connection with the failing setup").isFalse();
+        assertThat(next.isOpen()).as("Next connection should get the released slot").isTrue();
+        assertThat(next.pipeline().get(SslHandler.class)).as("TLS handler of the next connection").isNotNull();
+    }
+
+    /**
+     * Wraps the context so every engine it creates passes through the customizer, e.g. to restrict it like
+     * security properties would, or to fail its creation.
+     */
+    private static SSLContext wrapEngines(SSLContext delegate, UnaryOperator<SSLEngine> customizer) {
+        return new SSLContext(new SSLContextSpi() {
+            @Override
+            protected void engineInit(KeyManager[] keyManagers, TrustManager[] trustManagers, SecureRandom random) {
+            }
+
+            @Override
+            protected SSLSocketFactory engineGetSocketFactory() {
+                return delegate.getSocketFactory();
+            }
+
+            @Override
+            protected SSLServerSocketFactory engineGetServerSocketFactory() {
+                return delegate.getServerSocketFactory();
+            }
+
+            @Override
+            protected SSLEngine engineCreateSSLEngine() {
+                return customizer.apply(delegate.createSSLEngine());
+            }
+
+            @Override
+            protected SSLEngine engineCreateSSLEngine(String host, int port) {
+                return customizer.apply(delegate.createSSLEngine(host, port));
+            }
+
+            @Override
+            protected SSLSessionContext engineGetServerSessionContext() {
+                return delegate.getServerSessionContext();
+            }
+
+            @Override
+            protected SSLSessionContext engineGetClientSessionContext() {
+                return delegate.getClientSessionContext();
+            }
+        }, delegate.getProvider(), delegate.getProtocol()) {
+        };
     }
 
     @Test
