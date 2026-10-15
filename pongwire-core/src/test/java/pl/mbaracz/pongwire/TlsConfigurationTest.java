@@ -2,10 +2,14 @@ package pl.mbaracz.pongwire;
 
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageDecoder;
 import pl.mbaracz.pongwire.message.impl.plain.PlainTextMessageEncoder;
 
 import java.nio.file.Path;
+import java.security.KeyPairGenerator;
+import java.security.PublicKey;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
@@ -64,6 +68,15 @@ class TlsConfigurationTest {
         assertThatThrownBy(() -> server.listen(0))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("missing-certificate.pem");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Ed25519", "Ed448"})
+    void shouldCheckEdwardsCurveKeyWithItsOwnAlgorithm(String curve) throws Exception {
+        // The JDK reports both curves as EdDSA, an Ed448 key checked as Ed25519 would be rejected as a mismatch
+        PublicKey publicKey = KeyPairGenerator.getInstance(curve).generateKeyPair().getPublic();
+
+        assertThat(WebSocketServerChannelInitializer.signatureAlgorithm(publicKey)).isEqualTo(curve);
     }
 
     private static WebSocketServer<String, Object> newServer(TlsConfiguration configuration) {

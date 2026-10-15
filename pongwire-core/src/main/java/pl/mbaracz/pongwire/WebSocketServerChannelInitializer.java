@@ -41,10 +41,12 @@ import javax.net.ssl.SSLParameters;
 import java.io.File;
 import java.security.GeneralSecurityException;
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.Signature;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.security.interfaces.EdECKey;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -239,10 +241,24 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
 
         File certificateChain = configuration.certificateChain().toFile();
         File privateKey = configuration.privateKey().toFile();
+        X509Certificate[] chain;
+        PrivateKey key;
+
+        // Read once and handed to Netty as objects, so a rotation between two reads cannot pair the certificate
+        // of one version with the key of another
+        try {
+            chain = PemFiles.certificates(certificateChain);
+            key = PemFiles.privateKey(privateKey, configuration.privateKeyPassword());
+        } catch (Exception exception) {
+            throw new IllegalArgumentException(
+                "The certificate chain " + certificateChain + " or private key " + privateKey + " cannot be read: " + exception.getMessage(),
+                exception
+            );
+        }
 
         try {
-            checkKeyMatchesCertificate(certificateChain, privateKey, configuration.privateKeyPassword());
-            return SslContextBuilder.forServer(certificateChain, privateKey, configuration.privateKeyPassword()).build();
+            checkKeyMatchesCertificate(chain[0], key);
+            return SslContextBuilder.forServer(key, chain).build();
         } catch (SSLException | RuntimeException exception) {
             throw new IllegalArgumentException(
                 "Could not create the server TLS context from " + certificateChain + " and " + privateKey + ": " + exception.getMessage(),
@@ -255,27 +271,11 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
      * Checks that the private key belongs to the first certificate of the chain by signing with the key and verifying
      * with the certificate. Netty accepts a mismatched pair, and every TLS handshake would fail later.
      *
-     * @param certificateChain the certificate chain in PEM format.
-     * @param privateKey       the private key in PEM format.
-     * @param password         the password of the private key, or null.
+     * @param certificate the first certificate of the chain.
+     * @param key         the private key.
      */
-    private static void checkKeyMatchesCertificate(File certificateChain, File privateKey, String password) {
-        X509Certificate certificate;
-        PrivateKey key;
-
-        try {
-            certificate = PemFiles.certificates(certificateChain)[0];
-            key = PemFiles.privateKey(privateKey, password);
-        } catch (Exception exception) {
-            throw new IllegalArgumentException("The certificate chain or private key cannot be read", exception);
-        }
-
-        String algorithm = switch (certificate.getPublicKey().getAlgorithm()) {
-            case "RSA" -> "SHA256withRSA";
-            case "EC" -> "SHA256withECDSA";
-            case "Ed25519", "EdDSA" -> "Ed25519";
-            default -> null;
-        };
+    private static void checkKeyMatchesCertificate(X509Certificate certificate, PrivateKey key) {
+        String algorithm = signatureAlgorithm(certificate.getPublicKey());
 
         // shortcut: other key types are not checked, add their signature algorithm when a user needs one
         if (algorithm == null) {
@@ -303,6 +303,19 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
         }
 
         throw new IllegalArgumentException("The private key does not match the certificate");
+    }
+
+    /**
+     * Returns the signature algorithm to check a key pair with, or null for a key type that is not checked.
+     * The JDK reports both Edwards curves as EdDSA, the curve tells them apart.
+     */
+    static String signatureAlgorithm(PublicKey publicKey) {
+        return switch (publicKey.getAlgorithm()) {
+            case "RSA" -> "SHA256withRSA";
+            case "EC" -> "SHA256withECDSA";
+            case "Ed25519", "Ed448", "EdDSA" -> publicKey instanceof EdECKey edwardsKey ? edwardsKey.getParams().getName() : null;
+            default -> null;
+        };
     }
 
     /**
