@@ -22,8 +22,11 @@ import io.netty.handler.codec.http.websocketx.WebSocketCloseStatus;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionData;
+import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionDecoder;
+import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionEncoder;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionFilter;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionFilterProvider;
+import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtension;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensionHandler;
 import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensionHandshaker;
 import io.netty.handler.codec.http.websocketx.extensions.compression.PerMessageDeflateServerExtensionHandshaker;
@@ -380,7 +383,7 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
         return new WebSocketServerExtensionHandler(
             declineMalformed(offer -> withoutWindowBits.handshakeExtension(withServerParameters(offer, serverNoContextTakeover))),
             declineMalformed(offer -> fullWindow.equals(offer.parameters().get(SERVER_MAX_WINDOW_BITS))
-                ? withWindowBits.handshakeExtension(withServerParameters(offer, serverNoContextTakeover))
+                ? echoingServerWindowBits(withWindowBits.handshakeExtension(withServerParameters(offer, serverNoContextTakeover)))
                 : null)
         ) {
             @Override
@@ -402,6 +405,41 @@ class WebSocketServerChannelInitializer<T, D> extends ChannelInitializer<Channel
                     }
                 }
                 super.onHttpRequestChannelRead(context, request);
+            }
+        };
+    }
+
+    /**
+     * Netty leaves server_max_window_bits out of the response when it is 15, its maximum, but a server accepting
+     * the parameter must answer with it (RFC 7692, section 7.1.2.1), or a strict client fails the handshake.
+     */
+    private static WebSocketServerExtension echoingServerWindowBits(WebSocketServerExtension extension) {
+        if (extension == null) {
+            return null;
+        }
+
+        return new WebSocketServerExtension() {
+            @Override
+            public int rsv() {
+                return extension.rsv();
+            }
+
+            @Override
+            public WebSocketExtensionEncoder newExtensionEncoder() {
+                return extension.newExtensionEncoder();
+            }
+
+            @Override
+            public WebSocketExtensionDecoder newExtensionDecoder() {
+                return extension.newExtensionDecoder();
+            }
+
+            @Override
+            public WebSocketExtensionData newReponseData() {
+                WebSocketExtensionData response = extension.newReponseData();
+                Map<String, String> parameters = new LinkedHashMap<>(response.parameters());
+                parameters.put(SERVER_MAX_WINDOW_BITS, String.valueOf(PerMessageDeflateServerExtensionHandshaker.MAX_WINDOW_SIZE));
+                return new WebSocketExtensionData(response.name(), parameters);
             }
         };
     }

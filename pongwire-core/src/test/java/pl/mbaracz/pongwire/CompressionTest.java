@@ -207,9 +207,11 @@ class CompressionTest {
 
         HttpResponse response = handshake(channel, "permessage-deflate; server_max_window_bits=15");
 
+        // The accepted parameter is answered with its value (RFC 7692, section 7.1.2.1)
         assertThat(response.headers().get(HttpHeaderNames.SEC_WEBSOCKET_EXTENSIONS))
             .as("Should accept the offer")
-            .startsWith("permessage-deflate");
+            .startsWith("permessage-deflate")
+            .contains("server_max_window_bits=15");
     }
 
     @Test
